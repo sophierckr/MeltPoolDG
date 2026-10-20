@@ -1,3 +1,5 @@
+#include <deal.II/base/exception_macros.h>
+#include <algorithm>
 #include <meltpooldg/radiative_transport/ray_tracing.hpp>
 
 #ifdef DEAL_II_WITH_ARBORX
@@ -39,7 +41,7 @@ namespace MeltPoolDG::RadiativeTransport
 
         const number interface_length = std::sqrt(sx * sx + sy * sy);
 
-        if (ray_length == 0.0 || interface_length == 0.0)
+        if (ray_length == 0.0 or interface_length == 0.0)
           return;
 
         const number denominator = rx * sy - ry * sx;
@@ -47,7 +49,7 @@ namespace MeltPoolDG::RadiativeTransport
         const number denominator_tolerance =
           100.0 * std::numeric_limits<number>::epsilon() * ray_length * interface_length;
 
-        if (denominator >= -denominator_tolerance && denominator <= denominator_tolerance)
+        if (denominator >= -denominator_tolerance and denominator <= denominator_tolerance)
           return;
 
         const number qpx = primitive.a[0] - query.a[0];
@@ -59,8 +61,8 @@ namespace MeltPoolDG::RadiativeTransport
 
         const number parameter_tolerance = 100.0 * std::numeric_limits<number>::epsilon();
 
-        if (alpha < -parameter_tolerance || alpha > 1.0 + parameter_tolerance ||
-            beta < -parameter_tolerance || beta > 1.0 + parameter_tolerance)
+        if (alpha < -parameter_tolerance or alpha > 1.0 + parameter_tolerance or
+            beta < -parameter_tolerance or beta > 1.0 + parameter_tolerance)
           return;
 
         const number distance = alpha * ray_length;
@@ -129,8 +131,7 @@ namespace MeltPoolDG::RadiativeTransport
     , parameters(parameters_in)
     , mapping(1) // TODO: Allow user to specify mapping degree.
   {
-    static_assert(dim == 2 || dim == 3, "RayTracing only supports dim=2 and dim=3.");
-
+    AssertThrow(dim == 2 || dim == 3, ExcMessage("RayTracing only supports dim=2 and dim=3."));
     AssertThrow(parameters.refractive_index_incident > 0.0,
                 ExcMessage("Incident refractive index must be positive."));
     AssertThrow(parameters.refractive_index_material > 0.0,
@@ -453,23 +454,16 @@ namespace MeltPoolDG::RadiativeTransport
   void
   RayTracing<dim, number>::write_surface(const std::string &basename) const
   {
-    const unsigned int rank = Utilities::MPI::this_mpi_process(mpi_communicator);
-
     const unsigned int has_surface = local_surface_cells.empty() ? 0 : 1;
-
     const auto has_surface_per_rank = Utilities::MPI::all_gather(mpi_communicator, has_surface);
 
     const auto first_rank_with_surface =
-      std::find(has_surface_per_rank.begin(), has_surface_per_rank.end(), 1u);
+      std::ranges::find(has_surface_per_rank, 1u);
 
     if (first_rank_with_surface == has_surface_per_rank.end())
       return;
 
-    const unsigned int pvtu_writer_rank =
-      std::distance(has_surface_per_rank.begin(), first_rank_with_surface);
-
     Triangulation<dim - 1, dim> surface_triangulation;
-
     DataOut<dim - 1, dim> data_out;
 
     if (has_surface)
@@ -482,30 +476,11 @@ namespace MeltPoolDG::RadiativeTransport
 
         data_out.build_patches();
 
-        const std::string filename =
-          basename + "_rank_" + Utilities::int_to_string(rank, 4) + ".vtu";
-
-        std::ofstream output(filename);
-
-        data_out.write_vtu(output);
       }
+      const std::string filename =
+          basename + ".vtu";
 
-    MPI_Barrier(mpi_communicator);
-
-    if (rank == pvtu_writer_rank)
-      {
-        std::vector<std::string> piece_names;
-
-        for (unsigned int r = 0; r < has_surface_per_rank.size(); ++r)
-          if (has_surface_per_rank[r])
-            piece_names.emplace_back(basename + "_rank_" + Utilities::int_to_string(r, 4) + ".vtu");
-
-        std::ofstream output(basename + ".pvtu");
-
-        data_out.write_pvtu_record(output, piece_names);
-      }
-
-    MPI_Barrier(mpi_communicator);
+      data_out.write_vtu_in_parallel(filename,mpi_communicator);
   }
 
   template <int dim, typename number>

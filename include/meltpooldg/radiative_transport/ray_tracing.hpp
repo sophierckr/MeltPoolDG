@@ -12,6 +12,7 @@
 #include <deal.II/grid/tria.h>
 
 #include <deal.II/lac/la_parallel_vector.h>
+#include <cstddef>
 
 #ifdef DEAL_II_WITH_ARBORX
 #  include <ArborX.hpp>
@@ -142,7 +143,7 @@ namespace MeltPoolDG::RadiativeTransport
       /**
        * User-defined identifier preserved throughout all reflections.
        */
-      std::uint64_t id = 0;
+      std::size_t id = 0;
     };
 
     /**
@@ -175,7 +176,7 @@ namespace MeltPoolDG::RadiativeTransport
       /**
        * Identifier of the original ray.
        */
-      std::uint64_t ray_id = 0;
+      std::size_t ray_id = 0;
 
       /**
        * Reflection index. The first intersection has index zero.
