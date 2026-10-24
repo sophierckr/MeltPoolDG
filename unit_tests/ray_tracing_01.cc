@@ -17,13 +17,15 @@
 #include <deal.II/numerics/data_out.h>
 #include <deal.II/numerics/vector_tools.h>
 
+#include <meltpooldg/post_processing/output_data.hpp>
+#include <meltpooldg/post_processing/postprocessor.hpp>
 #include <meltpooldg/radiative_transport/ray_tracing.hpp>
+#include <meltpooldg/time_integration/time_stepping_data.hpp>
 
 #include <Kokkos_Core.hpp>
 
 #include <cmath>
-#include <fstream>
-#include <iomanip>
+
 #include <iostream>
 #include <string>
 #include <vector>
@@ -115,160 +117,6 @@ namespace
     data_out.write_vtu_in_parallel(basename + ".vtu", mpi_comm);
   }
 
-  template <int dim, typename IntersectionType>
-  void
-  write_intersections(const std::vector<IntersectionType> &intersections,
-                      const MPI_Comm                       mpi_comm,
-                      const std::string                   &basename)
-  {
-    const unsigned int rank = Utilities::MPI::this_mpi_process(mpi_comm);
-
-    const unsigned int n_ranks = Utilities::MPI::n_mpi_processes(mpi_comm);
-
-    const std::string filename = basename + "_rank_" + Utilities::int_to_string(rank, 4) + ".vtu";
-
-    {
-      std::ofstream output(filename);
-
-      output << std::setprecision(16);
-
-      const std::size_t n = intersections.size();
-
-      output << "<?xml version=\"1.0\"?>\n"
-             << "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" "
-                "byte_order=\"LittleEndian\">\n"
-             << "<UnstructuredGrid>\n"
-             << "<Piece NumberOfPoints=\"" << n << "\" NumberOfCells=\"" << n << "\">\n";
-
-      output << "<Points>\n"
-             << "<DataArray type=\"Float64\" "
-                "NumberOfComponents=\"3\" format=\"ascii\">\n";
-
-      for (const auto &intersection : intersections)
-        {
-          output << intersection.point[0] << ' ' << intersection.point[1] << ' ';
-
-          if constexpr (dim == 3)
-            output << intersection.point[2];
-          else
-            output << 0.0;
-
-          output << '\n';
-        }
-
-      output << "</DataArray>\n"
-             << "</Points>\n";
-
-      output << "<Cells>\n"
-             << "<DataArray type=\"Int64\" "
-                "Name=\"connectivity\" format=\"ascii\">\n";
-
-      for (std::size_t i = 0; i < n; ++i)
-        output << i << '\n';
-
-      output << "</DataArray>\n"
-             << "<DataArray type=\"Int64\" "
-                "Name=\"offsets\" format=\"ascii\">\n";
-
-      for (std::size_t i = 0; i < n; ++i)
-        output << i + 1 << '\n';
-
-      output << "</DataArray>\n"
-             << "<DataArray type=\"UInt8\" "
-                "Name=\"types\" format=\"ascii\">\n";
-
-      for (std::size_t i = 0; i < n; ++i)
-        output << 1 << '\n';
-
-      output << "</DataArray>\n"
-             << "</Cells>\n";
-
-      output << "<PointData>\n";
-
-      output << "<DataArray type=\"Float64\" "
-                "Name=\"energy\" format=\"ascii\">\n";
-
-      for (const auto &intersection : intersections)
-        output << intersection.energy << '\n';
-
-      output << "</DataArray>\n";
-
-      output << "<DataArray type=\"Float64\" "
-                "Name=\"ray_direction\" "
-                "NumberOfComponents=\"3\" "
-                "format=\"ascii\">\n";
-
-      for (const auto &intersection : intersections)
-        {
-          output << intersection.ray_direction[0] << ' ' << intersection.ray_direction[1] << ' ';
-
-          if constexpr (dim == 3)
-            output << intersection.ray_direction[2];
-          else
-            output << 0.0;
-
-          output << '\n';
-        }
-
-      output << "</DataArray>\n";
-
-      output << "<DataArray type=\"UInt64\" "
-                "Name=\"ray_id\" format=\"ascii\">\n";
-
-      for (const auto &intersection : intersections)
-        output << intersection.ray_id << '\n';
-
-      output << "</DataArray>\n";
-
-      output << "<DataArray type=\"UInt32\" "
-                "Name=\"reflection\" format=\"ascii\">\n";
-
-      for (const auto &intersection : intersections)
-        output << intersection.reflection << '\n';
-
-      output << "</DataArray>\n"
-             << "</PointData>\n"
-             << "</Piece>\n"
-             << "</UnstructuredGrid>\n"
-             << "</VTKFile>\n";
-    }
-
-    MPI_Barrier(mpi_comm);
-
-    if (rank == 0)
-      {
-        std::ofstream output(basename + ".pvtu");
-
-        output << "<?xml version=\"1.0\"?>\n"
-               << "<VTKFile type=\"PUnstructuredGrid\" version=\"0.1\" "
-                  "byte_order=\"LittleEndian\">\n"
-               << "<PUnstructuredGrid GhostLevel=\"0\">\n"
-               << "<PPointData>\n"
-               << "<PDataArray type=\"Float64\" "
-                  "Name=\"energy\"/>\n"
-               << "<PDataArray type=\"Float64\" "
-                  "Name=\"ray_direction\" "
-                  "NumberOfComponents=\"3\"/>\n"
-               << "<PDataArray type=\"UInt64\" "
-                  "Name=\"ray_id\"/>\n"
-               << "<PDataArray type=\"UInt32\" "
-                  "Name=\"reflection\"/>\n"
-               << "</PPointData>\n"
-               << "<PPoints>\n"
-               << "<PDataArray type=\"Float64\" "
-                  "NumberOfComponents=\"3\"/>\n"
-               << "</PPoints>\n";
-
-        for (unsigned int r = 0; r < n_ranks; ++r)
-          output << "<Piece Source=\"" << basename << "_rank_" << Utilities::int_to_string(r, 4)
-                 << ".vtu\"/>\n";
-
-        output << "</PUnstructuredGrid>\n"
-               << "</VTKFile>\n";
-      }
-
-    MPI_Barrier(mpi_comm);
-  }
 
   template <int dim>
   void
@@ -278,7 +126,7 @@ namespace
 
     const unsigned int rank = Utilities::MPI::this_mpi_process(mpi_comm);
 
-    ConditionalOStream pcout(std::cout, rank == 0);
+    dealii::ConditionalOStream pcout(std::cout, rank == 0);
 
     const std::string basename = "ray_tracing_" + Utilities::int_to_string(dim) + "d";
 
@@ -362,7 +210,16 @@ namespace
 
     const auto intersections = ray_tracer.trace(local_rays);
 
-    write_intersections<dim>(intersections, mpi_comm, basename + "_intersections");
+    // write_intersections<dim>(intersections, mpi_comm, basename + "_intersections");
+
+    OutputData<double> output_data;
+    output_data.point.enable   = true;
+    output_data.point.filename = basename + "_intersections";
+    const TimeIntegration::TimeSteppingData<double> time_data;
+    Postprocessor<dim, double>                      postprocessor(
+      mpi_comm, output_data, time_data, mapping, triangulation, pcout);
+    postprocessor.process_points(0, 0.0, intersections);
+
 
     const unsigned int n_intersections =
       Utilities::MPI::sum(static_cast<unsigned int>(intersections.size()), mpi_comm);

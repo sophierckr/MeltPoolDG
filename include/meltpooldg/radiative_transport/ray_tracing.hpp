@@ -12,6 +12,9 @@
 #include <deal.II/grid/tria.h>
 
 #include <deal.II/lac/la_parallel_vector.h>
+
+#include <deal.II/numerics/data_component_interpretation.h>
+
 #include <cstddef>
 
 #ifdef DEAL_II_WITH_ARBORX
@@ -148,6 +151,7 @@ namespace MeltPoolDG::RadiativeTransport
 
     /**
      * Information associated with one ray-interface interaction.
+     * Interface for Postprocessor::process_points()
      */
     struct Intersection
     {
@@ -182,6 +186,21 @@ namespace MeltPoolDG::RadiativeTransport
        * Reflection index. The first intersection has index zero.
        */
       unsigned int reflection = 0;
+      /**
+       * Names and interpretations of the properties written by fill_output(). Components of
+       * ray_direction share one name so that they are written as a vector.
+       */
+      static std::pair<
+        std::vector<std::string>,
+        std::vector<dealii::DataComponentInterpretation::DataComponentInterpretation>>
+      get_property_names_and_component_interpretation();
+
+      /**
+       * Write the location and the properties of this intersection, in the order of
+       * get_property_names_and_component_interpretation(), to @p location and @p properties.
+       */
+      void
+      fill_output(dealii::Point<dim> &location, double *properties) const;
     };
 
     /**

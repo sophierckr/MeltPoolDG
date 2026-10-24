@@ -1,5 +1,5 @@
 #include <deal.II/base/exception_macros.h>
-#include <algorithm>
+
 #include <meltpooldg/radiative_transport/ray_tracing.hpp>
 
 #ifdef DEAL_II_WITH_ARBORX
@@ -14,7 +14,6 @@
 #  include <algorithm>
 #  include <array>
 #  include <cmath>
-#  include <fstream>
 
 namespace MeltPoolDG::RadiativeTransport
 {
@@ -173,6 +172,9 @@ namespace MeltPoolDG::RadiativeTransport
     local_primitives = Kokkos::View<ArborXPrimitive *, MemorySpace>("ray_tracing_local_primitives",
                                                                     local_surface_cells.size());
 
+    // storing the surface both the indexed mesh from the marching cube algorithm and the
+    // non-indexed mesh for ArborX might need a lot of memory for high-resolution meshes, is there a
+    // more efficient way?
     for (unsigned int i = 0; i < local_surface_cells.size(); ++i)
       {
         const auto &cell = local_surface_cells[i];
@@ -454,17 +456,16 @@ namespace MeltPoolDG::RadiativeTransport
   void
   RayTracing<dim, number>::write_surface(const std::string &basename) const
   {
-    const unsigned int has_surface = local_surface_cells.empty() ? 0 : 1;
+    const unsigned int has_surface  = local_surface_cells.empty() ? 0 : 1;
     const auto has_surface_per_rank = Utilities::MPI::all_gather(mpi_communicator, has_surface);
 
-    const auto first_rank_with_surface =
-      std::ranges::find(has_surface_per_rank, 1u);
+    const auto first_rank_with_surface = std::ranges::find(has_surface_per_rank, 1u);
 
     if (first_rank_with_surface == has_surface_per_rank.end())
       return;
 
     Triangulation<dim - 1, dim> surface_triangulation;
-    DataOut<dim - 1, dim> data_out;
+    DataOut<dim - 1, dim>       data_out;
 
     if (has_surface)
       {
@@ -475,12 +476,10 @@ namespace MeltPoolDG::RadiativeTransport
         data_out.attach_triangulation(surface_triangulation);
 
         data_out.build_patches();
-
       }
-      const std::string filename =
-          basename + ".vtu";
+    const std::string filename = basename + ".vtu";
 
-      data_out.write_vtu_in_parallel(filename,mpi_communicator);
+    data_out.write_vtu_in_parallel(filename, mpi_communicator);
   }
 
   template <int dim, typename number>
@@ -488,6 +487,37 @@ namespace MeltPoolDG::RadiativeTransport
   RayTracing<dim, number>::n_local_interface_cells() const
   {
     return static_cast<unsigned int>(local_surface_cells.size());
+  }
+
+  template <int dim, typename number>
+  std::pair<std::vector<std::string>,
+            std::vector<dealii::DataComponentInterpretation::DataComponentInterpretation>>
+  RayTracing<dim, number>::Intersection::get_property_names_and_component_interpretation()
+  {
+    namespace DCI = dealii::DataComponentInterpretation;
+
+    std::vector<std::string> names{"energy", "ray_id", "reflection"};
+    names.insert(names.end(), dim, "ray_direction");
+
+    std::vector<DCI::DataComponentInterpretation> interpretations(3, DCI::component_is_scalar);
+    interpretations.insert(interpretations.end(), dim, DCI::component_is_part_of_vector);
+
+    return {names, interpretations};
+  }
+
+
+
+  template <int dim, typename number>
+  void
+  RayTracing<dim, number>::Intersection::fill_output(dealii::Point<dim> &location,
+                                                     double             *properties) const
+  {
+    location      = point;
+    properties[0] = static_cast<double>(energy);
+    properties[1] = static_cast<double>(ray_id);
+    properties[2] = static_cast<double>(reflection);
+    for (unsigned int d = 0; d < dim; ++d)
+      properties[3 + d] = static_cast<double>(ray_direction[d]);
   }
 
   template class RayTracing<2, double>;
