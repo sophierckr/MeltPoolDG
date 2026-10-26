@@ -14,8 +14,9 @@
 #include <deal.II/lac/la_parallel_vector.h>
 
 #include <deal.II/numerics/data_component_interpretation.h>
+#include <deal.II/particles/particle_handler.h>
 
-#include <cstddef>
+#include <meltpooldg/radiative_transport/ray_utils.hpp>
 
 #ifdef DEAL_II_WITH_ARBORX
 #  include <ArborX.hpp>
@@ -25,7 +26,6 @@
 #  include <Kokkos_Core.hpp>
 #endif
 
-#include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
@@ -72,135 +72,15 @@ namespace MeltPoolDG::RadiativeTransport
   {
   public:
     using VectorType = dealii::LinearAlgebra::distributed::Vector<number>;
+using Ray          = RadiativeTransport::Ray<dim, number>;
+    using Intersection = RadiativeTransport::Intersection<dim, number>;
 
-    /**
-     * Parameters controlling the interface reconstruction and ray tracing.
-     */
     struct Parameters
     {
-      /**
-       * Refractive index of the medium in which the ray propagates before
-       * reaching the interface.
-       */
-      number refractive_index_incident = 1.0;
-
-      /**
-       * Refractive index of the material represented by the level-set
-       * interface.
-       *
-       * The current implementation assumes a real-valued refractive index.
-       */
-      number refractive_index_material = 1.5;
-
-      /**
-       * Minimum reflected ray energy retained for subsequent reflections.
-       */
-      number energy_threshold = 1e-4;
-
-      /**
-       * Maximum number of interface interactions considered for each ray.
-       */
-      unsigned int max_reflections = 20;
-
-      /**
-       * Number of subdivisions used by the marching-square/cube algorithm
-       * within each background cell.
-       */
+      OpticalParameters<number> optics;
       unsigned int marching_cube_subdivisions = 2;
-
-      /**
-       * Geometrical tolerance used by the marching-square/cube algorithm.
-       */
-      number marching_cube_tolerance = 1e-10;
-
-      /**
-       * Small displacement applied to a reflected ray origin to avoid
-       * immediately intersecting the same interface primitive again.
-       */
-      number ray_epsilon = 1e-10;
-    };
-
-    /**
-     * Representation of a ray.
-     */
-    struct Ray
-    {
-      /**
-       * Current ray origin.
-       */
-      dealii::Point<dim> origin;
-
-      /**
-       * Propagation direction.
-       *
-       * The direction does not have to be normalized when supplied to
-       * RayTracing::trace().
-       */
-      dealii::Tensor<1, dim, number> direction;
-
-      /**
-       * Current ray energy.
-       */
-      number energy = 0.0;
-
-      /**
-       * User-defined identifier preserved throughout all reflections.
-       */
-      std::size_t id = 0;
-    };
-
-    /**
-     * Information associated with one ray-interface interaction.
-     * Interface for Postprocessor::process_points()
-     */
-    struct Intersection
-    {
-      /**
-       * Physical intersection position.
-       */
-      dealii::Point<dim> point;
-
-      /**
-       * Normalized incoming ray direction at the intersection.
-       */
-      dealii::Tensor<1, dim, number> ray_direction;
-
-      /**
-       * Energy absorbed at this interface interaction.
-       *
-       * If E_in denotes the incoming ray energy and R the Fresnel
-       * reflectivity, this value is
-       *
-       * @f[
-       *   E_\mathrm{abs} = (1-R) E_\mathrm{in}.
-       * @f]
-       */
-      number energy = 0.0;
-
-      /**
-       * Identifier of the original ray.
-       */
-      std::size_t ray_id = 0;
-
-      /**
-       * Reflection index. The first intersection has index zero.
-       */
-      unsigned int reflection = 0;
-      /**
-       * Names and interpretations of the properties written by fill_output(). Components of
-       * ray_direction share one name so that they are written as a vector.
-       */
-      static std::pair<
-        std::vector<std::string>,
-        std::vector<dealii::DataComponentInterpretation::DataComponentInterpretation>>
-      get_property_names_and_component_interpretation();
-
-      /**
-       * Write the location and the properties of this intersection, in the order of
-       * get_property_names_and_component_interpretation(), to @p location and @p properties.
-       */
-      void
-      fill_output(dealii::Point<dim> &location, double *properties) const;
+      number       marching_cube_tolerance    = 1e-10;
+      number       ray_epsilon                = 1e-10;
     };
 
     /**
@@ -364,12 +244,6 @@ namespace MeltPoolDG::RadiativeTransport
     std::vector<FirstHit>
     compute_first_hits(const std::vector<Ray> &rays) const;
 
-    /**
-     * Compute Fresnel reflectivity for unpolarized light and real-valued
-     * refractive indices.
-     */
-    static number
-    fresnel_reflectivity(const number n1, const number n2, const number cos_theta_i);
 
     MPI_Comm mpi_communicator;
 

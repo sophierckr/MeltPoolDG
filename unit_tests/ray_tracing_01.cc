@@ -20,6 +20,7 @@
 #include <meltpooldg/post_processing/output_data.hpp>
 #include <meltpooldg/post_processing/postprocessor.hpp>
 #include <meltpooldg/radiative_transport/ray_tracing.hpp>
+#include <meltpooldg/radiative_transport/ray_utils.hpp>
 #include <meltpooldg/time_integration/time_stepping_data.hpp>
 
 #include <Kokkos_Core.hpp>
@@ -161,9 +162,9 @@ namespace
 
     typename RayTracer::Parameters parameters;
 
-    parameters.refractive_index_incident = 1.0;
+    parameters.optics.refractive_index_incident = 1.0;
 
-    parameters.refractive_index_material = 1.5;
+    parameters.optics.refractive_index_material = 1.5;
 
     /*
      * For normal incidence with n1=1 and n2=1.5:
@@ -179,9 +180,9 @@ namespace
      *
      * The fourth value is below the threshold.
      */
-    parameters.energy_threshold = 1e-4;
+    parameters.optics.energy_threshold = 1e-4;
 
-    parameters.max_reflections = 10;
+    parameters.optics.max_reflections = 10;
 
     parameters.marching_cube_subdivisions = 2;
 

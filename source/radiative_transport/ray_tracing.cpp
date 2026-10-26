@@ -4,12 +4,16 @@
 
 #ifdef DEAL_II_WITH_ARBORX
 
+#  include <deal.II/base/bounding_box.h>
 #  include <deal.II/base/exceptions.h>
 #  include <deal.II/base/utilities.h>
 
+#  include <deal.II/grid/filtered_iterator.h>
 #  include <deal.II/grid/grid_tools.h>
 
 #  include <deal.II/numerics/data_out.h>
+
+#  include <deal.II/particles/particle_handler.h>
 
 #  include <algorithm>
 #  include <array>
@@ -131,12 +135,7 @@ namespace MeltPoolDG::RadiativeTransport
     , mapping(1) // TODO: Allow user to specify mapping degree.
   {
     AssertThrow(dim == 2 || dim == 3, ExcMessage("RayTracing only supports dim=2 and dim=3."));
-    AssertThrow(parameters.refractive_index_incident > 0.0,
-                ExcMessage("Incident refractive index must be positive."));
-    AssertThrow(parameters.refractive_index_material > 0.0,
-                ExcMessage("Material refractive index must be positive."));
-    AssertThrow(parameters.energy_threshold >= 0.0,
-                ExcMessage("Energy threshold must be non-negative."));
+    parameters.optics.check();
     AssertThrow(parameters.ray_epsilon > 0.0, ExcMessage("Ray epsilon must be positive."));
     AssertThrow(Kokkos::is_initialized(),
                 ExcMessage("Kokkos must be initialized before constructing RayTracing."));
@@ -350,7 +349,7 @@ namespace MeltPoolDG::RadiativeTransport
     active_rays.reserve(initial_rays.size());
 
     for (const auto &ray : initial_rays)
-      if (ray.energy >= parameters.energy_threshold)
+      if (ray.energy >= parameters.optics.energy_threshold)
         {
           AssertThrow(ray.direction.norm() > 0.0, ExcMessage("Ray direction must be non-zero."));
 
@@ -359,7 +358,7 @@ namespace MeltPoolDG::RadiativeTransport
 
     std::vector<Intersection> intersections;
 
-    for (unsigned int reflection = 0; reflection < parameters.max_reflections; ++reflection)
+    for (unsigned int reflection = 0; reflection < parameters.optics.max_reflections; ++reflection)
       {
         const unsigned int global_number_of_active_rays =
           Utilities::MPI::sum(static_cast<unsigned int>(active_rays.size()), mpi_communicator);
@@ -383,37 +382,19 @@ namespace MeltPoolDG::RadiativeTransport
             Tensor<1, dim, number> direction = ray.direction;
             direction /= direction.norm();
 
-            Tensor<1, dim, number> normal = hit.normal;
-            normal /= normal.norm();
-
-            if (direction * normal > 0.0)
-              normal *= -1.0;
-
-            const number cos_theta_i = std::clamp(-(direction * normal), number(0), number(1));
-
-            const number reflectivity = fresnel_reflectivity(parameters.refractive_index_incident,
-                                                             parameters.refractive_index_material,
-                                                             cos_theta_i);
-
-            const number absorbed_energy = (1.0 - reflectivity) * ray.energy;
-
-            const number reflected_energy = reflectivity * ray.energy;
+            const auto r = reflect(direction, hit.normal, ray.energy, parameters.optics);
 
             intersections.emplace_back(
-              Intersection{hit.point, direction, absorbed_energy, ray.id, reflection});
+              Intersection{hit.point, direction, r.absorbed_energy, ray.id, reflection});
 
-            if (reflected_energy < parameters.energy_threshold)
+            if (r.reflected_energy < parameters.optics.energy_threshold)
               continue;
-
-            Tensor<1, dim, number> reflected_direction =
-              direction - 2.0 * (direction * normal) * normal;
-            reflected_direction /= reflected_direction.norm();
 
             Ray reflected_ray;
             reflected_ray.id        = ray.id;
-            reflected_ray.energy    = reflected_energy;
-            reflected_ray.direction = reflected_direction;
-            reflected_ray.origin    = hit.point + parameters.ray_epsilon * reflected_direction;
+            reflected_ray.energy    = r.reflected_energy;
+            reflected_ray.direction = r.direction;
+            reflected_ray.origin    = hit.point + parameters.ray_epsilon * r.direction;
 
             next_rays.emplace_back(reflected_ray);
           }
@@ -424,33 +405,6 @@ namespace MeltPoolDG::RadiativeTransport
     return intersections;
   }
 
-  template <int dim, typename number>
-  number
-  RayTracing<dim, number>::fresnel_reflectivity(const number n1,
-                                                const number n2,
-                                                const number cos_theta_i)
-  {
-    const number cos_i = std::clamp(cos_theta_i, number(0), number(1));
-
-    const number sin2_i = std::max(number(0), number(1) - cos_i * cos_i);
-
-    if (n1 == n2)
-      return 0.0;
-
-    const number eta = n1 / n2;
-
-    const number sin2_t = eta * eta * sin2_i;
-
-    if (sin2_t >= 1.0)
-      return 1.0;
-
-    const number cos_t = std::sqrt(1.0 - sin2_t);
-
-    const number r_s = (n1 * cos_i - n2 * cos_t) / (n1 * cos_i + n2 * cos_t);
-    const number r_p = (n2 * cos_i - n1 * cos_t) / (n2 * cos_i + n1 * cos_t);
-
-    return 0.5 * (r_s * r_s + r_p * r_p);
-  }
 
   template <int dim, typename number>
   void
@@ -489,36 +443,6 @@ namespace MeltPoolDG::RadiativeTransport
     return static_cast<unsigned int>(local_surface_cells.size());
   }
 
-  template <int dim, typename number>
-  std::pair<std::vector<std::string>,
-            std::vector<dealii::DataComponentInterpretation::DataComponentInterpretation>>
-  RayTracing<dim, number>::Intersection::get_property_names_and_component_interpretation()
-  {
-    namespace DCI = dealii::DataComponentInterpretation;
-
-    std::vector<std::string> names{"energy", "ray_id", "reflection"};
-    names.insert(names.end(), dim, "ray_direction");
-
-    std::vector<DCI::DataComponentInterpretation> interpretations(3, DCI::component_is_scalar);
-    interpretations.insert(interpretations.end(), dim, DCI::component_is_part_of_vector);
-
-    return {names, interpretations};
-  }
-
-
-
-  template <int dim, typename number>
-  void
-  RayTracing<dim, number>::Intersection::fill_output(dealii::Point<dim> &location,
-                                                     double             *properties) const
-  {
-    location      = point;
-    properties[0] = static_cast<double>(energy);
-    properties[1] = static_cast<double>(ray_id);
-    properties[2] = static_cast<double>(reflection);
-    for (unsigned int d = 0; d < dim; ++d)
-      properties[3 + d] = static_cast<double>(ray_direction[d]);
-  }
 
   template class RayTracing<2, double>;
   template class RayTracing<3, double>;
