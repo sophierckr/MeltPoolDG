@@ -26,7 +26,6 @@
 #include <Kokkos_Core.hpp>
 
 #include <cmath>
-
 #include <iostream>
 #include <string>
 #include <vector>

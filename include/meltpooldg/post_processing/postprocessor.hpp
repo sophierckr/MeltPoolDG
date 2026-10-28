@@ -32,7 +32,7 @@
 
 namespace MeltPoolDG
 {
-  //Requirements on a type describing one point for Postprocessor::process_points().
+  // Requirements on a type describing one point for Postprocessor::process_points().
   template <typename T, int dim>
   concept PointOutputType =
     requires(const T &point_data, dealii::Point<dim> &point, double *properties) {
@@ -132,8 +132,8 @@ namespace MeltPoolDG
     void
     serialize(Archive &ar, const unsigned int /*version*/)
     {
-      ar & vector_times_and_names;
-      ar & time_at_last_output;
+      ar &vector_times_and_names;
+      ar &time_at_last_output;
     }
 
     void

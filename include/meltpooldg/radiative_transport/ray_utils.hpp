@@ -136,31 +136,33 @@ namespace MeltPoolDG::RadiativeTransport
      */
     static std::pair<std::vector<std::string>,
                      std::vector<dealii::DataComponentInterpretation::DataComponentInterpretation>>
-    get_property_names_and_component_interpretation(){
-    namespace DCI = dealii::DataComponentInterpretation;
+    get_property_names_and_component_interpretation()
+    {
+      namespace DCI = dealii::DataComponentInterpretation;
 
-    std::vector<std::string> names{"energy", "ray_id", "reflection"};
-    names.insert(names.end(), dim, "ray_direction");
+      std::vector<std::string> names{"energy", "ray_id", "reflection"};
+      names.insert(names.end(), dim, "ray_direction");
 
-    std::vector<DCI::DataComponentInterpretation> interpretations(3, DCI::component_is_scalar);
-    interpretations.insert(interpretations.end(), dim, DCI::component_is_part_of_vector);
+      std::vector<DCI::DataComponentInterpretation> interpretations(3, DCI::component_is_scalar);
+      interpretations.insert(interpretations.end(), dim, DCI::component_is_part_of_vector);
 
-    return {names, interpretations};
-  }
+      return {names, interpretations};
+    }
 
     /**
      * Write the location and the properties of this intersection, in the order of
      * get_property_names_and_component_interpretation(), to @p location and @p properties.
      */
     void
-    fill_output(dealii::Point<dim> &location, double *properties) const{
-    location      = point;
-    properties[0] = static_cast<double>(energy);
-    properties[1] = static_cast<double>(ray_id);
-    properties[2] = static_cast<double>(reflection);
-    for (unsigned int d = 0; d < dim; ++d)
-      properties[3 + d] = static_cast<double>(ray_direction[d]);
-  }
+    fill_output(dealii::Point<dim> &location, double *properties) const
+    {
+      location      = point;
+      properties[0] = static_cast<double>(energy);
+      properties[1] = static_cast<double>(ray_id);
+      properties[2] = static_cast<double>(reflection);
+      for (unsigned int d = 0; d < dim; ++d)
+        properties[3 + d] = static_cast<double>(ray_direction[d]);
+    }
   };
 
   /**

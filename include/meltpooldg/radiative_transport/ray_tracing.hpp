@@ -14,6 +14,7 @@
 #include <deal.II/lac/la_parallel_vector.h>
 
 #include <deal.II/numerics/data_component_interpretation.h>
+
 #include <deal.II/particles/particle_handler.h>
 
 #include <meltpooldg/radiative_transport/ray_utils.hpp>
@@ -71,16 +72,16 @@ namespace MeltPoolDG::RadiativeTransport
   class RayTracing
   {
   public:
-    using VectorType = dealii::LinearAlgebra::distributed::Vector<number>;
-using Ray          = RadiativeTransport::Ray<dim, number>;
+    using VectorType   = dealii::LinearAlgebra::distributed::Vector<number>;
+    using Ray          = RadiativeTransport::Ray<dim, number>;
     using Intersection = RadiativeTransport::Intersection<dim, number>;
 
     struct Parameters
     {
       OpticalParameters<number> optics;
-      unsigned int marching_cube_subdivisions = 2;
-      number       marching_cube_tolerance    = 1e-10;
-      number       ray_epsilon                = 1e-10;
+      unsigned int              marching_cube_subdivisions = 2;
+      number                    marching_cube_tolerance    = 1e-10;
+      number                    ray_epsilon                = 1e-10;
     };
 
     /**
