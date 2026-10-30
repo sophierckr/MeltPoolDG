@@ -74,7 +74,7 @@ namespace MeltPoolDG::RadiativeTransport
 
     /// Collective. Energy of rays that left the domain during the last trace().
     number
-    get_escaped_energy() const;
+    get_lost_energy() const;
 
   private:
     enum Property : unsigned int
@@ -101,8 +101,8 @@ namespace MeltPoolDG::RadiativeTransport
     std::vector<std::vector<dealii::BoundingBox<dim>>>        global_bounding_boxes;
     std::unique_ptr<dealii::NonMatching::MeshClassifier<dim>> mesh_classifier;
 
-    number step_length    = 0;
-    number escaped_energy = 0;
+    number step_length = 0;
+    number lost_energy = 0;
   };
 
 } // namespace MeltPoolDG::RadiativeTransport

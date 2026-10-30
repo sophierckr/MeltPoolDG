@@ -13,7 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
-// #include <cstdint>
+#include <cstdint>
 #include <limits>
 #include <optional>
 #include <utility>
@@ -149,7 +149,7 @@ namespace MeltPoolDG::RadiativeTransport
 
     particle_handler.signals.particle_lost.connect(
       [this](const auto &particle, const auto & /*cell*/) {
-        escaped_energy += particle->get_properties()[Property::energy];
+        lost_energy += particle->get_properties()[Property::energy];
       });
 
     reinit(level_set_dof_handler_in, level_set_in);
@@ -207,7 +207,10 @@ namespace MeltPoolDG::RadiativeTransport
       for (const Ray &ray : rays)
         {
           if (ray.energy < parameters.optics.energy_threshold)
-            continue;
+            {
+              lost_energy += ray.energy;
+              continue;
+            }
 
           Assert(ray.direction.norm() > 0, ExcMessage("Ray direction must be non-zero."));
           Assert(ray.id < (std::uint64_t(1) << 53), ExcMessage("Ray id not exact as double."));
@@ -222,7 +225,6 @@ namespace MeltPoolDG::RadiativeTransport
           properties.push_back(std::move(p));
         }
 
-      escaped_energy = 0;
       particle_handler.insert_global_particles(positions,
                                                global_bounding_boxes,
                                                properties); // TODO alle nur einmal drinnen?
@@ -269,7 +271,7 @@ namespace MeltPoolDG::RadiativeTransport
 
                 // Search from the previous position (or eps after the start or a hit) to the
                 // next position, clipped to this cell. Together with the neighbors this covers
-                // the whole path, except cells clipped between two positions.
+                // the whole path, except cells clipped between two positions. (TODO that)
                 const auto [t_entry, t_exit] = ray_box_interval(box, x, direction);
                 const number t_begin =
                   std::max(t_entry, eps - number(props[Property::has_moved]) * step_length);
@@ -303,7 +305,10 @@ namespace MeltPoolDG::RadiativeTransport
 
                     if (reflection + 1 >= parameters.optics.max_reflections ||
                         r.reflected_energy < parameters.optics.energy_threshold)
-                      to_remove.push_back(particle);
+                      {
+                        lost_energy += r.reflected_energy;
+                        to_remove.push_back(particle);
+                      }
                     else
                       {
                         for (unsigned int d = 0; d < dim; ++d)
@@ -336,9 +341,9 @@ namespace MeltPoolDG::RadiativeTransport
 
   template <int dim, typename number>
   number
-  RayMarching<dim, number>::get_escaped_energy() const
+  RayMarching<dim, number>::get_lost_energy() const
   {
-    return Utilities::MPI::sum(escaped_energy, mpi_communicator);
+    return Utilities::MPI::sum(lost_energy, mpi_communicator);
   }
 
 

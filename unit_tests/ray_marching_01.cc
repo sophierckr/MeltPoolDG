@@ -25,13 +25,31 @@
 
 #include <Kokkos_Core.hpp>
 
+#include <array>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
 using namespace dealii;
 using namespace MeltPoolDG;
+
+void
+check_close(const double       actual,
+            const double       expected,
+            const double       tolerance,
+            const std::string &what)
+{
+  std::ostringstream message;
+  message << std::scientific << std::setprecision(6) << what << ": actual = " << actual
+          << ", expected = " << expected << ", |diff| = " << std::abs(actual - expected)
+          << " (tolerance " << tolerance << ")";
+
+  AssertThrow(std::abs(actual - expected) < tolerance, ExcMessage(message.str()));
+}
+
 
 using VectorType = LinearAlgebra::distributed::Vector<double>;
 
@@ -157,9 +175,9 @@ namespace
 
     write_background(dof_handler, level_set, mapping, mpi_comm, basename + "_background");
 
-    using RayTracer = RadiativeTransport::RayMarching<dim, double>;
+    using RayMarcher = RadiativeTransport::RayMarching<dim, double>;
 
-    typename RayTracer::Parameters parameters;
+    typename RayMarcher::Parameters parameters;
 
     parameters.optics.refractive_index_incident = 1.0;
 
@@ -183,24 +201,27 @@ namespace
 
     parameters.optics.max_reflections = 10;
 
-    RayTracer ray_tracer(dof_handler, level_set, parameters, mpi_comm);
+    RayMarcher ray_marcher(dof_handler, level_set, parameters, mpi_comm);
 
-    std::vector<typename RayTracer::Ray> local_rays;
+    std::vector<typename RayMarcher::Ray> local_rays;
+    double                                energy_ray_1 = 1.0;
+    double                                energy_ray_2 = 0.5e-4;
+    double                                energy_in    = energy_ray_1 + energy_ray_2;
 
     if (rank == 0)
       {
-        local_rays.emplace_back(
-          typename RayTracer::Ray{first_ray_origin<dim>(), downward_direction<dim>(), 1.0, 0});
+        local_rays.emplace_back(typename RayMarcher::Ray{
+          first_ray_origin<dim>(), downward_direction<dim>(), energy_ray_1, 0});
 
         /*
          * This ray is below the energy threshold and must therefore be
          * removed before marching.
          */
-        local_rays.emplace_back(
-          typename RayTracer::Ray{second_ray_origin<dim>(), downward_direction<dim>(), 0.5e-4, 1});
+        local_rays.emplace_back(typename RayMarcher::Ray{
+          second_ray_origin<dim>(), downward_direction<dim>(), energy_ray_2, 1});
       }
 
-    const auto intersections = ray_tracer.trace(local_rays);
+    const auto intersections = ray_marcher.trace(local_rays);
 
     OutputData<double> output_data;
     output_data.point.enable   = true;
@@ -214,57 +235,72 @@ namespace
     const unsigned int n_intersections =
       Utilities::MPI::sum(static_cast<unsigned int>(intersections.size()), mpi_comm);
 
+
+    double total_energy        = ray_marcher.get_lost_energy();
+    double intersection_energy = 0.0;
+
     AssertThrow(n_intersections == 3, ExcMessage("Expected exactly three intersections."));
 
+    postprocessor.process_points(0, 0.0, intersections);
+
+    // Expected values indexed by reflection (ray history), not by position in the local vector.
+    constexpr std::array<double, 3> expected_z      = {0.3, 0.7, 0.3};
+    constexpr std::array<double, 3> expected_energy = {0.96, 0.0384, 0.001536};
+    constexpr std::array<double, 3> expected_dir_z  = {-1.0, 1.0, -1.0};
+
+    constexpr double position_tolerance = 1e-8;
+    constexpr double energy_tolerance   = 1e-10;
+
+    std::array<unsigned int, 3> local_count{};
+
+    for (const auto &intersection : intersections)
+      {
+        AssertThrow(intersection.ray_id == 0,
+                    ExcMessage("Ray below the energy threshold generated an intersection."));
+        AssertThrow(intersection.reflection < expected_z.size(),
+                    ExcMessage("Unexpected reflection index."));
+
+        const unsigned int k   = intersection.reflection;
+        const std::string  tag = " (reflection " + std::to_string(k) + ")";
+
+        ++local_count[k];
+
+        check_close(intersection.point[dim - 1],
+                    expected_z[k],
+                    position_tolerance,
+                    "Wrong intersection position" + tag);
+        check_close(intersection.energy,
+                    expected_energy[k],
+                    energy_tolerance,
+                    "Wrong absorbed energy" + tag);
+        check_close(intersection.ray_direction.norm(),
+                    1.0,
+                    1e-12,
+                    "Stored ray direction not normalized" + tag);
+
+        intersection_energy += intersection.energy;
+
+        AssertThrow(intersection.ray_direction[dim - 1] * expected_dir_z[k] > 0.0,
+                    ExcMessage("Wrong ray direction" + tag));
+      }
+
+    // Every reflection must occur exactly once, summed over all ranks.
+    std::array<unsigned int, 3> global_count{};
+    Utilities::MPI::sum(ArrayView<const unsigned int>(local_count),
+                        mpi_comm,
+                        ArrayView<unsigned int>(global_count));
+
+    total_energy += Utilities::MPI::sum(static_cast<double>(intersection_energy), mpi_comm);
     if (rank == 0)
       {
-        AssertDimension(intersections.size(), 3);
-
-        constexpr double position_tolerance = 1e-8;
-
-        AssertThrow(std::abs(intersections[0].point[dim - 1] - 0.3) < position_tolerance,
-                    ExcMessage("Wrong first intersection position."));
-
-        AssertThrow(std::abs(intersections[1].point[dim - 1] - 0.7) < position_tolerance,
-                    ExcMessage("Wrong second intersection position."));
-
-        AssertThrow(std::abs(intersections[2].point[dim - 1] - 0.3) < position_tolerance,
-                    ExcMessage("Wrong third intersection position."));
-
-        constexpr double energy_tolerance = 1e-10;
-
-        AssertThrow(std::abs(intersections[0].energy - 0.96) < energy_tolerance,
-                    ExcMessage("Wrong absorbed energy at first intersection."));
-
-        AssertThrow(std::abs(intersections[1].energy - 0.0384) < energy_tolerance,
-                    ExcMessage("Wrong absorbed energy at second intersection."));
-
-        AssertThrow(std::abs(intersections[2].energy - 0.001536) < energy_tolerance,
-                    ExcMessage("Wrong absorbed energy at third intersection."));
-
-        for (unsigned int i = 0; i < intersections.size(); ++i)
-          {
-            AssertThrow(intersections[i].ray_id == 0,
-                        ExcMessage("Ray below the energy threshold generated an intersection."));
-
-            AssertThrow(intersections[i].reflection == i,
-                        ExcMessage("Incorrect reflection index."));
-
-            const double direction_norm = intersections[i].ray_direction.norm();
-
-            AssertThrow(std::abs(direction_norm - 1.0) < 1e-12,
-                        ExcMessage("Stored ray direction is not normalized."));
-          }
-
-        AssertThrow(intersections[0].ray_direction[dim - 1] < 0.0,
-                    ExcMessage("First ray direction should point downward."));
-
-        AssertThrow(intersections[1].ray_direction[dim - 1] > 0.0,
-                    ExcMessage("Second ray direction should point upward."));
-
-        AssertThrow(intersections[2].ray_direction[dim - 1] < 0.0,
-                    ExcMessage("Third ray direction should point downward."));
+        check_close(total_energy, energy_in, energy_tolerance, "Wrong total energy");
       }
+
+
+    for (unsigned int k = 0; k < global_count.size(); ++k)
+      AssertThrow(global_count[k] == 1,
+                  ExcMessage("Reflection " + std::to_string(k) + " occurred " +
+                             std::to_string(global_count[k]) + " times, expected exactly once."));
 
     pcout << dim << "D intersections: " << n_intersections << std::endl;
 
