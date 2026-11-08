@@ -21,14 +21,14 @@
 namespace MeltPoolDG::RadiativeTransport
 {
   /**
-   * Ray marcher for an interface given by the zero level set of a finite element field.
+   * Ray marcher for an interface given by the level set of a finite element field.
    *
-   * Rays are deal.II particles that advance by a fixed step and are moved between MPI ranks
+   * Rays are deal.II particles that advance to the next cell each timestep and are moved
    * by a ParticleHandler. In cells cut by the interface, the level set is sampled along the
    * ray for a sign change, which is then refined by bisection.
    *
-   * Assumes axis-aligned box cells (e.g. from GridGenerator::subdivided_hyper_rectangle and
-   * refinement), so that the map to the reference cell is a scaling.
+   * Assumes axis-aligned box cells (and refinement),
+   * so that the map to the reference cell is a scaling.
    */
   template <int dim, typename number>
   class RayMarching
@@ -42,14 +42,17 @@ namespace MeltPoolDG::RadiativeTransport
     {
       OpticalParameters<number> optics;
 
-      /// Safety limit on marching steps.
-      unsigned int max_steps = 1000;
+      /// Safety limit on steps
+      unsigned int max_steps = 10000;
 
-      /// Offset after the start and after reflections, relative to the step length.
+      /// Offset into the next cell, relative to the step length.
       number relative_epsilon = 1e-6;
 
       /// Samples per search window for locating the first root.
       unsigned int n_root_samples = 6;
+
+      /// isovalue at which the interface lies
+      number contour_value = 0.0;
     };
 
     /// Collective. Triangulation, DoFHandler and level set must outlive this object.
@@ -69,6 +72,7 @@ namespace MeltPoolDG::RadiativeTransport
 
     /// Collective. Every ray must be passed on exactly one rank and start inside the domain
     /// (rays outside are dropped by the ParticleHandler). Returns the hits found on this rank.
+    /// Energy of dropped rays is added onto lost_energy.
     std::vector<Intersection>
     trace(const std::vector<Ray> &rays);
 

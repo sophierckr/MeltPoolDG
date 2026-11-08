@@ -192,7 +192,29 @@ namespace MeltPoolDG::RadiativeTransport
                                                ArborX::Triangle<3, number>>;
 
     using Predicate = decltype(ArborX::intersects(ArborXQuery{}));
-    using Tree      = ArborX::DistributedTree<MemorySpace, ArborXPrimitive>;
+
+    struct SurfacePrimitive
+    {
+      ArborXPrimitive geometry;
+      unsigned int    cell_index;
+    };
+
+    struct GeometryGetter
+    {
+      KOKKOS_FUNCTION ArborXPrimitive const &
+      operator()(SurfacePrimitive const &p) const
+      {
+        return p.geometry;
+      }
+      KOKKOS_FUNCTION ArborXPrimitive
+      operator()(SurfacePrimitive &&p) const
+      {
+        return p.geometry;
+      }
+    };
+    using Tree = ArborX::DistributedTree<MemorySpace, SurfacePrimitive, GeometryGetter>;
+
+
 
     /**
      * Minimal information returned from a rank owning an intersected
@@ -200,10 +222,12 @@ namespace MeltPoolDG::RadiativeTransport
      */
     struct HitCandidate
     {
-      number distance;
-      number normal_x;
-      number normal_y;
-      number normal_z;
+      number       distance;
+      number       normal_x;
+      number       normal_y;
+      number       normal_z;
+      unsigned int cell_index;
+      unsigned int rank;
     };
 
     /**
@@ -215,6 +239,9 @@ namespace MeltPoolDG::RadiativeTransport
       number                         distance = std::numeric_limits<number>::infinity();
       dealii::Point<dim>             point;
       dealii::Tensor<1, dim, number> normal;
+      unsigned int cell_index; // active_cell_index of the cell containing the hit, rank-local
+      unsigned int rank;       // rank that holds the cell which was hit
+      // dealii::Point<dim> reference_location; // position of the hit in the reference cell
     };
 
     /**
@@ -229,7 +256,8 @@ namespace MeltPoolDG::RadiativeTransport
      */
     struct IntersectionCallback
     {
-      number minimum_distance;
+      number       minimum_distance;
+      unsigned int rank;
 
       template <typename PredicateType, typename PrimitiveType, typename OutputFunctor>
       KOKKOS_FUNCTION void
@@ -276,7 +304,7 @@ namespace MeltPoolDG::RadiativeTransport
     /**
      * Rank-local ArborX interface primitives.
      */
-    Kokkos::View<ArborXPrimitive *, MemorySpace> local_primitives;
+    Kokkos::View<SurfacePrimitive *, MemorySpace> local_primitives;
 
     /**
      * Distributed ArborX tree.

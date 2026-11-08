@@ -27,10 +27,11 @@ namespace MeltPoolDG::RadiativeTransport
   template <typename PredicateType, typename PrimitiveType, typename OutputFunctor>
   KOKKOS_FUNCTION void
   RayTracing<dim, number>::IntersectionCallback::operator()(const PredicateType &predicate,
-                                                            const PrimitiveType &primitive,
+                                                            const PrimitiveType &surface_primitive,
                                                             const OutputFunctor &out) const
   {
-    const auto &query = ArborX::getGeometry(predicate);
+    const auto &primitive = surface_primitive.geometry;
+    const auto &query     = ArborX::getGeometry(predicate);
 
     if constexpr (dim == 2)
       {
@@ -76,7 +77,7 @@ namespace MeltPoolDG::RadiativeTransport
         const number nx = -sy / interface_length;
         const number ny = sx / interface_length;
 
-        out(HitCandidate{distance, nx, ny, 0.0});
+        out(HitCandidate{distance, nx, ny, 0.0, surface_primitive.cell_index, rank});
       }
     else
       {
@@ -121,7 +122,8 @@ namespace MeltPoolDG::RadiativeTransport
         ny /= normal_length;
         nz /= normal_length;
 
-        out(HitCandidate{distance, nx, ny, nz});
+
+        out(HitCandidate{distance, nx, ny, nz, surface_primitive.cell_index, rank});
       }
   }
 
@@ -162,14 +164,26 @@ namespace MeltPoolDG::RadiativeTransport
     if (!vector_is_ghosted)
       level_set.update_ghost_values();
 
-    marching_cubes.process(
-      level_set_dof_handler, level_set, 0.0, local_surface_vertices, local_surface_cells);
+    std::vector<unsigned int> cell_indices;
+    for (const auto
+           &cell : // replaces marching_cubes.process() which would also just call process_cell()
+         level_set_dof_handler.active_cell_iterators() | IteratorFilters::LocallyOwnedCell())
+      {
+        const std::size_t n_before = local_surface_cells.size();
+        marching_cubes.process_cell(
+          cell, level_set, 0.0, local_surface_vertices, local_surface_cells);
+        if (local_surface_cells.size() == n_before)
+          continue;
+
+        cell_indices.resize(local_surface_cells.size(), cell->active_cell_index());
+      }
+
 
     if (!vector_is_ghosted)
       level_set.zero_out_ghost_values();
 
-    local_primitives = Kokkos::View<ArborXPrimitive *, MemorySpace>("ray_tracing_local_primitives",
-                                                                    local_surface_cells.size());
+    local_primitives = Kokkos::View<SurfacePrimitive *, MemorySpace>("ray_tracing_local_primitives",
+                                                                     local_surface_cells.size());
 
     // storing the surface both the indexed mesh from the marching cube algorithm and the
     // non-indexed mesh for ArborX might need a lot of memory for high-resolution meshes, is there a
@@ -185,7 +199,8 @@ namespace MeltPoolDG::RadiativeTransport
             const auto &p0 = local_surface_vertices[cell.vertices[0]];
             const auto &p1 = local_surface_vertices[cell.vertices[1]];
 
-            local_primitives(i) = ArborXPrimitive{{{p0[0], p0[1]}}, {{p1[0], p1[1]}}};
+            auto primitive      = ArborXPrimitive{{{p0[0], p0[1]}}, {{p1[0], p1[1]}}};
+            local_primitives(i) = SurfacePrimitive{primitive, cell_indices[i]};
           }
         else
           {
@@ -195,9 +210,11 @@ namespace MeltPoolDG::RadiativeTransport
             const auto &p1 = local_surface_vertices[cell.vertices[1]];
             const auto &p2 = local_surface_vertices[cell.vertices[2]];
 
-            local_primitives(i) = ArborXPrimitive{{{p0[0], p0[1], p0[2]}},
-                                                  {{p1[0], p1[1], p1[2]}},
-                                                  {{p2[0], p2[1], p2[2]}}};
+            auto primitive = ArborXPrimitive{{{p0[0], p0[1], p0[2]}},
+                                             {{p1[0], p1[1], p1[2]}},
+                                             {{p2[0], p2[1], p2[2]}}};
+
+            local_primitives(i) = SurfacePrimitive{primitive, cell_indices[i]};
           }
       }
 
@@ -225,7 +242,8 @@ namespace MeltPoolDG::RadiativeTransport
                     ExcMessage("Invalid global background-mesh bounding box."));
       }
 
-    tree = std::make_unique<Tree>(mpi_communicator, execution_space, local_primitives);
+    tree =
+      std::make_unique<Tree>(mpi_communicator, execution_space, local_primitives, GeometryGetter{});
   }
 
   template <int dim, typename number>
@@ -296,7 +314,8 @@ namespace MeltPoolDG::RadiativeTransport
 
     tree->query(execution_space,
                 predicates,
-                IntersectionCallback{parameters.ray_epsilon},
+                IntersectionCallback{parameters.ray_epsilon,
+                                     Utilities::MPI::this_mpi_process(mpi_communicator)},
                 candidates,
                 offsets);
 
@@ -325,6 +344,8 @@ namespace MeltPoolDG::RadiativeTransport
 
             if constexpr (dim == 3)
               first_hit.normal[2] = candidate.normal_z;
+            first_hit.cell_index = candidate.cell_index;
+            first_hit.rank       = candidate.rank;
           }
 
         if (first_hit.hit)
@@ -356,7 +377,11 @@ namespace MeltPoolDG::RadiativeTransport
           active_rays.emplace_back(ray);
         }
 
-    std::vector<Intersection> intersections;
+    // intersections sorted by rank so that they can be send to the owner of the geometry thats hit
+    // afterwards
+    std::map<unsigned int, std::vector<Intersection>> intersections_by_rank;
+
+
 
     for (unsigned int reflection = 0; reflection < parameters.optics.max_reflections; ++reflection)
       {
@@ -384,8 +409,12 @@ namespace MeltPoolDG::RadiativeTransport
 
             const auto r = reflect(direction, hit.normal, ray.energy, parameters.optics);
 
-            intersections.emplace_back(
-              Intersection{hit.point, direction, r.absorbed_energy, ray.id, reflection});
+            intersections_by_rank[hit.rank].emplace_back(Intersection{hit.point,
+                                                                      direction,
+                                                                      r.absorbed_energy,
+                                                                      ray.id,
+                                                                      reflection,
+                                                                      hit.cell_index}); // FIXME
 
             if (r.reflected_energy < parameters.optics.energy_threshold)
               continue;
@@ -402,6 +431,19 @@ namespace MeltPoolDG::RadiativeTransport
         active_rays = std::move(next_rays);
       }
 
+    // Right now, all intersections are on the rank of the corresponding ray, we now send them to
+    // the rank that owns the geometry that got hit
+    auto        received = Utilities::MPI::some_to_some(mpi_communicator, intersections_by_rank);
+    std::size_t n_total  = 0;
+    for (const auto &[sender, vec] : received)
+      n_total += vec.size();
+    std::vector<Intersection> intersections;
+
+    intersections.reserve(n_total);
+    for (const auto &[rank, vec] : received)
+      {
+        intersections.insert(intersections.end(), vec.begin(), vec.end());
+      }
     return intersections;
   }
 

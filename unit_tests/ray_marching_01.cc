@@ -17,6 +17,7 @@
 #include <deal.II/numerics/data_out.h>
 #include <deal.II/numerics/vector_tools.h>
 
+#include "meltpooldg/radiative_transport/ray_rhs_assembly.hpp"
 #include <meltpooldg/post_processing/output_data.hpp>
 #include <meltpooldg/post_processing/postprocessor.hpp>
 #include <meltpooldg/radiative_transport/ray_marching.hpp>
@@ -32,6 +33,8 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+#include "test_utils/ray_test_level_sets.hpp"
 
 using namespace dealii;
 using namespace MeltPoolDG;
@@ -52,30 +55,10 @@ check_close(const double       actual,
 
 
 using VectorType = LinearAlgebra::distributed::Vector<double>;
+using namespace MeltPoolDG::TestUtils;
 
 namespace
 {
-  template <int dim>
-  class TwoParallelSurfacesLevelSet : public Function<dim>
-  {
-  public:
-    TwoParallelSurfacesLevelSet()
-      : Function<dim>(1)
-    {}
-
-    double
-    value(const Point<dim> &point, const unsigned int component = 0) const override
-    {
-      AssertIndexRange(component, 1);
-
-      const double coordinate = point[dim - 1];
-
-      if (coordinate <= 0.5)
-        return coordinate - 0.3;
-
-      return 0.7 - coordinate;
-    }
-  };
 
   template <int dim>
   Tensor<1, dim>
@@ -135,6 +118,31 @@ namespace
     data_out.write_vtu_in_parallel(basename + ".vtu", mpi_comm);
   }
 
+  template <int dim>
+  void
+  write_rhs(const DoFHandler<dim>                                            &dof_handler,
+            const VectorType                                                 &level_set,
+            VectorType                                                       &rhs,
+            const std::vector<RadiativeTransport::Intersection<dim, double>> &intersections,
+            const Mapping<dim>                                               &mapping,
+            const MPI_Comm                                                    mpi_comm,
+            const std::string                                                &basename)
+  {
+    // Energie pro Zelle (Debug: Sind es die erwarteten Zellen?)
+    Vector<float> cell_energy(dof_handler.get_triangulation().n_active_cells());
+    for (const auto &hit : intersections)
+      cell_energy[hit.cell_index] += hit.energy;
+
+    rhs.update_ghost_values(); // DataOut braucht Ghost-Werte
+
+    DataOut<dim> data_out;
+    data_out.add_data_vector(dof_handler, level_set, "level_set");
+    data_out.add_data_vector(dof_handler, rhs, "heat_rhs");
+    data_out.add_data_vector(cell_energy, "cell_energy", DataOut<dim>::type_cell_data);
+    data_out.build_patches(mapping);
+    data_out.write_vtu_in_parallel(basename + ".vtu", mpi_comm);
+  }
+
 
   template <int dim>
   void
@@ -158,6 +166,7 @@ namespace
     FE_Q<dim>            fe(1);
 
     DoFHandler<dim> dof_handler(triangulation);
+    // TODO Test with local refinement
 
     dof_handler.distribute_dofs(fe);
 
@@ -241,7 +250,6 @@ namespace
 
     AssertThrow(n_intersections == 3, ExcMessage("Expected exactly three intersections."));
 
-    postprocessor.process_points(0, 0.0, intersections);
 
     // Expected values indexed by reflection (ray history), not by position in the local vector.
     constexpr std::array<double, 3> expected_z      = {0.3, 0.7, 0.3};
@@ -290,12 +298,31 @@ namespace
                         mpi_comm,
                         ArrayView<unsigned int>(global_count));
 
-    total_energy += Utilities::MPI::sum(static_cast<double>(intersection_energy), mpi_comm);
+    AffineConstraints<double> constraints;
+    constraints.reinit(dof_handler.locally_owned_dofs(),
+                       DoFTools::extract_locally_relevant_dofs(dof_handler));
+    constraints.close();
+    VectorType rhs;
+    rhs.reinit(dof_handler.locally_owned_dofs(),
+               DoFTools::extract_locally_relevant_dofs(dof_handler),
+               mpi_comm);
+
+    RadiativeTransport::assemble_ray_energy_rhs(intersections, dof_handler, constraints, rhs, true);
+
+
+
+    auto total_intersection_energy =
+      Utilities::MPI::sum(static_cast<double>(intersection_energy), mpi_comm);
+    total_energy += total_intersection_energy;
     if (rank == 0)
       {
         check_close(total_energy, energy_in, energy_tolerance, "Wrong total energy");
       }
-
+    AssertThrow(std::abs(rhs.l1_norm() - total_intersection_energy) < 1e-12,
+                ExcMessage("Sum of rhs " + std::to_string(rhs.l1_norm()) +
+                           "does not match the energy" + std::to_string(total_intersection_energy) +
+                           "of the hits."));
+    write_rhs(dof_handler, level_set, rhs, intersections, mapping, mpi_comm, basename + "_rhs");
 
     for (unsigned int k = 0; k < global_count.size(); ++k)
       AssertThrow(global_count[k] == 1,

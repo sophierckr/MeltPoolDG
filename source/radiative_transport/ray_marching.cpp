@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -25,7 +26,6 @@ namespace MeltPoolDG::RadiativeTransport
   namespace
   {
     // Bisection for a sign change of f in [a, b], with f_a = f(a).
-    // TODO change to more efficient approach?
     template <typename Function, typename number>
     number
     bisect(const Function &f, number a, number b, number f_a, const number tolerance)
@@ -46,15 +46,15 @@ namespace MeltPoolDG::RadiativeTransport
     }
 
 
-
-    // First root of f in [t_begin, t_end]: uniform sampling for a sign change, then bisection.
+    // First root of f in [t_begin, t_end]:
+    // uniform sampling for a sign change, then bisection.
     template <typename Function, typename number>
     std::optional<number>
-    first_root(const Function    &f,
-               const number       t_begin,
-               const number       t_end,
-               const unsigned int n_samples,
-               const number       tolerance)
+    find_first_intersection(const Function    &f,
+                            const number       t_begin,
+                            const number       t_end,
+                            const unsigned int n_samples,
+                            const number       tolerance)
     {
       number t0 = t_begin;
       number f0 = f(t0);
@@ -95,7 +95,6 @@ namespace MeltPoolDG::RadiativeTransport
 
 
     // Level set at p in an axis-aligned box cell.
-    // TODO change to more efficient approach
     template <int dim, typename number>
     number
     level_set_value(const FiniteElement<dim> &fe,
@@ -169,16 +168,18 @@ namespace MeltPoolDG::RadiativeTransport
 
     const auto &tria = level_set_dof_handler_in.get_triangulation();
 
-#ifdef DEBUG
+    // Check that cells are axis-aligned
+    std::size_t wrong_cells = 0;
     for (const auto &cell : tria.active_cell_iterators())
       if (cell->is_locally_owned())
         {
           const BoundingBox<dim> box = cell->bounding_box();
           for (const unsigned int v : cell->vertex_indices())
-            Assert(cell->vertex(v).distance(box.vertex(v)) < 1e-10 * cell->diameter(),
-                   ExcMessage("RayMarching requires axis-aligned box cells."));
+            if (cell->vertex(v).distance(box.vertex(v)) > 1e-10 * cell->diameter())
+              wrong_cells++;
         }
-#endif
+    AssertThrow(Utilities::MPI::max(wrong_cells, mpi_communicator) == 0,
+                ExcMessage("RayMarching requires axis-aligned box cells."));
 
     global_bounding_boxes = Utilities::MPI::all_gather(
       mpi_communicator,
@@ -200,6 +201,7 @@ namespace MeltPoolDG::RadiativeTransport
     Assert(level_set_dof_handler != nullptr && level_set != nullptr, ExcNotInitialized());
 
     // Insert rays above the energy threshold; deal.II sends them to the owning rank.
+    // Rays with energy below threshold are added to lost_energy
     {
       std::vector<Point<dim>>          positions;
       std::vector<std::vector<double>> properties;
@@ -225,9 +227,7 @@ namespace MeltPoolDG::RadiativeTransport
           properties.push_back(std::move(p));
         }
 
-      particle_handler.insert_global_particles(positions,
-                                               global_bounding_boxes,
-                                               properties); // TODO alle nur einmal drinnen?
+      particle_handler.insert_global_particles(positions, global_bounding_boxes, properties);
     }
 
     const FiniteElement<dim> &fe  = level_set_dof_handler->get_fe();
@@ -238,13 +238,14 @@ namespace MeltPoolDG::RadiativeTransport
     Vector<number>            cell_values(fe.n_dofs_per_cell());
     std::vector<Intersection> intersections;
 
-    // Pseudo-time = marched distance: one time step per marching step of length step_length.
     TimeIntegration::TimeSteppingData<number> time_data;
     time_data.start_time     = 0;
     time_data.time_step_size = step_length;
     time_data.end_time       = parameters.max_steps * step_length;
     time_data.max_n_steps    = parameters.max_steps;
     TimeIntegration::TimeIterator<number> time_iterator(time_data);
+
+
 
     while (!time_iterator.is_finished() && particle_handler.n_global_particles() > 0)
       {
@@ -262,28 +263,28 @@ namespace MeltPoolDG::RadiativeTransport
             for (unsigned int d = 0; d < dim; ++d)
               direction[d] = props[Property::direction + d];
 
-            if (mesh_classifier->location_to_level_set(cell) ==
-                NonMatching::LocationToLevelSet::intersected)
+            const BoundingBox<dim> box   = cell->bounding_box();
+            const auto [t_entry, t_exit] = ray_box_interval(box, x, direction);
+
+            cell->as_dof_handler_iterator(*level_set_dof_handler)
+              ->get_dof_values(*level_set, cell_values);
+
+            const auto g = [&](const number t) {
+              return level_set_value(fe, cell_values, box, x + t * direction) -
+                     parameters.contour_value;
+            };
+
+            const number g_start = g(0);
+            const number g_end   = g(t_exit);
+
+            if (g_start * g_end <= 0)
               {
-                cell->as_dof_handler_iterator(*level_set_dof_handler)
-                  ->get_dof_values(*level_set, cell_values);
-                const BoundingBox<dim> box = cell->bounding_box();
-
-                // Search from the previous position (or eps after the start or a hit) to the
-                // next position, clipped to this cell. Together with the neighbors this covers
-                // the whole path, except cells clipped between two positions. (TODO that)
-                const auto [t_entry, t_exit] = ray_box_interval(box, x, direction);
-                const number t_begin =
-                  std::max(t_entry, eps - number(props[Property::has_moved]) * step_length);
-                const number t_end = std::min(t_exit, step_length);
-
-                const auto phi = [&](const number t) {
-                  return level_set_value(fe, cell_values, box, x + t * direction);
-                };
-
+                const number t_begin = props[Property::has_moved] ? t_entry - eps : number(0);
+                const number t_end   = t_exit;
                 const std::optional<number> t_hit =
                   (t_begin < t_end) ?
-                    first_root(phi, t_begin, t_end, parameters.n_root_samples, root_tolerance) :
+                    find_first_intersection(
+                      g, t_begin, t_end, parameters.n_root_samples, root_tolerance) :
                     std::nullopt;
 
                 if (t_hit)
@@ -301,7 +302,8 @@ namespace MeltPoolDG::RadiativeTransport
                                    direction,
                                    r.absorbed_energy,
                                    static_cast<std::uint64_t>(props[Property::ray_id]),
-                                   reflection});
+                                   reflection,
+                                   cell->active_cell_index()});
 
                     if (reflection + 1 >= parameters.optics.max_reflections ||
                         r.reflected_energy < parameters.optics.energy_threshold)
@@ -316,13 +318,13 @@ namespace MeltPoolDG::RadiativeTransport
                         props[Property::energy]           = r.reflected_energy;
                         props[Property::reflection_count] = reflection + 1;
                         props[Property::has_moved]        = 0;
-                        particle->set_location(x_hit);
+                        particle->set_location(x_hit + eps * r.direction);
                       }
                     continue;
                   }
               }
 
-            particle->set_location(x + step_length * direction);
+            particle->set_location(x + (t_exit + eps) * direction);
             props[Property::has_moved] = 1;
           }
 

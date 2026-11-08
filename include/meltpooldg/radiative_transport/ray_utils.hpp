@@ -1,6 +1,7 @@
 #pragma once
 
 #include <deal.II/base/exceptions.h>
+#include <deal.II/base/function.h>
 #include <deal.II/base/point.h>
 #include <deal.II/base/tensor.h>
 
@@ -22,6 +23,7 @@
  */
 namespace MeltPoolDG::RadiativeTransport
 {
+  using namespace dealii;
   /**
    * Optical parameters common to all ray tracers.
    */
@@ -100,14 +102,7 @@ namespace MeltPoolDG::RadiativeTransport
   template <int dim, typename number>
   struct Intersection
   {
-    /**
-     * Physical intersection position.
-     */
-    dealii::Point<dim> point;
-
-    /**
-     * Normalized incoming ray direction at the intersection.
-     */
+    dealii::Point<dim>             point;
     dealii::Tensor<1, dim, number> ray_direction;
 
     /**
@@ -120,15 +115,13 @@ namespace MeltPoolDG::RadiativeTransport
      */
     number energy = 0.0;
 
-    /**
-     * Identifier of the original ray.
-     */
     std::size_t ray_id = 0;
 
-    /**
-     * Reflection index. The first intersection has index zero.
-     */
-    unsigned int reflection = 0;
+    unsigned int reflection = 0; // Reflection index. The first intersection has index zero.
+
+    unsigned int cell_index; // active_cell_index of the cell containing the hit, rank-local
+
+    // dealii::Point<dim> reference_location; // position of the hit in the reference cell
 
     /**
      * Names and interpretations of the properties written by fill_output(). Components of
@@ -162,6 +155,13 @@ namespace MeltPoolDG::RadiativeTransport
       properties[2] = static_cast<double>(reflection);
       for (unsigned int d = 0; d < dim; ++d)
         properties[3 + d] = static_cast<double>(ray_direction[d]);
+    }
+
+    template <class Archive>
+    void
+    serialize(Archive &ar, const unsigned int /*version*/)
+    {
+      ar &point &ray_direction &energy &ray_id &reflection &cell_index;
     }
   };
 
@@ -252,5 +252,112 @@ namespace MeltPoolDG::RadiativeTransport
     result.absorbed_energy  = (number(1) - reflectivity) * energy;
     return result;
   }
+
+  template <int dim, typename number>
+  std::vector<Ray<dim, number>>
+  make_laser_rays(const Point<dim>             &center,
+                  const Tensor<1, dim, number> &beam_direction,
+                  const Function<dim, number>  &intensity_profile,
+                  const number                  radius,
+                  const number                  spacing,
+                  const unsigned int            rank,
+                  const unsigned int            n_ranks)
+  {
+    AssertThrow(radius > 0, ExcMessage("The radius must be positive."));
+    AssertThrow(spacing > 0, ExcMessage("The ray spacing must be positive."));
+    AssertThrow(n_ranks > 0 && rank < n_ranks, ExcMessage("Invalid rank."));
+    AssertThrow(beam_direction.norm() > 0, ExcMessage("The beam direction must be non-zero."));
+
+    const Tensor<1, dim, number> direction = beam_direction / beam_direction.norm();
+
+    // Orthonormal basis
+    std::array<Tensor<1, dim, number>, dim - 1> basis;
+    if constexpr (dim == 2)
+      {
+        basis[0][0] = -direction[1];
+        basis[0][1] = direction[0];
+      }
+    else
+      {
+        // Helper axis: the coordinate axis that is most perpendicular to the beam.
+        unsigned int axis = 0;
+        for (unsigned int d = 1; d < dim; ++d)
+          if (std::abs(direction[d]) < std::abs(direction[axis]))
+            axis = d;
+
+        Tensor<1, dim, number> helper;
+        helper[axis] = 1;
+
+        basis[0] = cross_product_3d(direction, helper);
+        basis[0] /= basis[0].norm();
+        basis[1] = cross_product_3d(direction, basis[0]);
+      }
+    // Regular grid over [-R, R] per lateral direction
+    const std::size_t n_per_direction =
+      std::max<std::size_t>(1, static_cast<std::size_t>(std::ceil(2 * radius / spacing)));
+    const number delta = 2 * radius / n_per_direction;
+
+    std::size_t n_rays  = 1;
+    number      measure = 1; // area (3D) or length (2D) represented by one ray
+    for (unsigned int k = 0; k < dim - 1; ++k)
+      {
+        n_rays *= n_per_direction;
+        measure *= delta;
+      }
+
+    std::vector<Ray<dim, number>> rays;
+    rays.reserve(n_rays / n_ranks + 1);
+
+    // Round-robin over the ranks: ray i is created on rank i % n_ranks
+    for (std::size_t id = rank; id < n_rays; id += n_ranks)
+      {
+        Point<dim>  origin = center;
+        std::size_t rest   = id;
+        for (unsigned int k = 0; k < dim - 1; ++k)
+          {
+            const number offset = (rest % n_per_direction + number(0.5)) * delta - radius;
+            origin += offset * basis[k];
+            rest /= n_per_direction;
+          }
+
+        rays.push_back({origin, direction, intensity_profile.value(origin) * measure, id});
+      }
+
+    return rays;
+  }
+
+  template std::vector<Ray<2, float>>
+  make_laser_rays<2, float>(const Point<2> &,
+                            const Tensor<1, 2, float> &,
+                            const Function<2, float> &,
+                            const float,
+                            const float,
+                            const unsigned int,
+                            const unsigned int);
+  template std::vector<Ray<2, double>>
+  make_laser_rays<2, double>(const Point<2> &,
+                             const Tensor<1, 2, double> &,
+                             const Function<2, double> &,
+                             const double,
+                             const double,
+                             const unsigned int,
+                             const unsigned int);
+  template std::vector<Ray<3, float>>
+  make_laser_rays<3, float>(const Point<3> &,
+                            const Tensor<1, 3, float> &,
+                            const Function<3, float> &,
+                            const float,
+                            const float,
+                            const unsigned int,
+                            const unsigned int);
+  template std::vector<Ray<3, double>>
+  make_laser_rays<3, double>(const Point<3> &,
+                             const Tensor<1, 3, double> &,
+                             const Function<3, double> &,
+                             const double,
+                             const double,
+                             const unsigned int,
+                             const unsigned int);
+
 
 } // namespace MeltPoolDG::RadiativeTransport
