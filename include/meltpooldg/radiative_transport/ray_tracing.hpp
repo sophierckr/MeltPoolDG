@@ -37,7 +37,7 @@ namespace MeltPoolDG::RadiativeTransport
 {
 #ifdef DEAL_II_WITH_ARBORX
   /**
-   * Distributed ray tracer for interfaces represented by a level-set field.
+   * @brief Distributed ray tracer for interfaces represented by a level-set field.
    *
    * The zero level set is reconstructed using deal.II's marching-square
    * algorithm in two dimensions and marching-cube algorithm in three
@@ -81,25 +81,20 @@ namespace MeltPoolDG::RadiativeTransport
     struct Parameters
     {
       OpticalParameters<number> optics;
-      /*
-       * Subdivisions per background cell used by the marching-square/cube algorithm.
-       */
+
+      /// Subdivisions per background cell used by the marching-square/cube algorithm.
       unsigned int marching_cube_subdivisions = 2;
 
-      /*Geometrical tolerance of the marching -
-        square / cube algorithm.*/
+      /// Geometrical tolerance of the marching-square/cube algorithm.
       number marching_cube_tolerance = 1e-10;
 
-      /*
-       * Offset of a reflected ray origin along the new direction and minimum hit
-       * distance, so that a ray does not hit the primitive it was reflected from.
-       */
+      /// Offset of a reflected ray origin along the new direction and minimum hit
+      /// distance, so that a ray does not hit the primitive it was reflected from.
       number ray_epsilon = 1e-10;
     };
 
     /**
-     * Construct the ray tracer and reconstruct the current level-set
-     * interface.
+     * @brief Construct the ray tracer and reconstruct the current level-set interface.
      *
      * Construction is collective and must be performed by every MPI rank in
      * @p mpi_communicator.
@@ -110,6 +105,9 @@ namespace MeltPoolDG::RadiativeTransport
      * @param parameters Ray-tracing parameters.
      * @param mpi_communicator MPI communicator used by the distributed ArborX
      * tree.
+     *
+     * @throws dealii::ExcMessage if the optical parameters are invalid, if
+     * Parameters::ray_epsilon is not positive or if Kokkos is not initialized.
      */
     RayTracing(const dealii::DoFHandler<dim> &level_set_dof_handler,
                const VectorType              &level_set,
@@ -117,19 +115,21 @@ namespace MeltPoolDG::RadiativeTransport
                const MPI_Comm                 mpi_communicator = MPI_COMM_WORLD);
 
     /**
-     * Reconstruct the local interface and rebuild the distributed ArborX tree.
+     * @brief Reconstruct the local interface and rebuild the distributed ArborX tree.
      *
      * This function should be called after the level-set geometry changes.
      *
      * @param level_set_dof_handler DoFHandler associated with the current
      * level-set field.
      * @param level_set Distributed level-set vector.
+     *
+     * @throws dealii::ExcMessage if the global background-mesh bounding box is invalid.
      */
     void
     reinit(const dealii::DoFHandler<dim> &level_set_dof_handler, const VectorType &level_set);
 
     /**
-     * Trace locally owned rays through the distributed interface.
+     * @brief Trace locally owned rays through the distributed interface.
      *
      * Rays remain associated with the MPI rank on which they are supplied.
      * ArborX forwards geometric queries to ranks whose local interface
@@ -144,28 +144,21 @@ namespace MeltPoolDG::RadiativeTransport
      *
      * @param initial_rays Rays owned by the current MPI process.
      *
-     * @return Intersection history for the locally owned rays. The energy
+     * @return Intersection history for the intersections with the locally owned geometry. The energy
      * stored in every entry is the energy absorbed at that intersection.
+     *
+     * @throws dealii::ExcMessage if the direction of a ray is zero.
      */
     std::vector<Intersection>
     trace(const std::vector<Ray> &initial_rays) const;
 
     /**
-     * Write the locally reconstructed interface of all MPI ranks into the single file.
+     * @brief Write the locally reconstructed interface of all MPI ranks into the single file.
      *
      * In two dimensions the interface files contain line elements. In three
      * dimensions they contain triangular elements.
      *
      * No interface geometry is communicated between ranks for output.
-     *
-     * Example:
-     *
-     * @code
-     * ray_tracing_surface.pvtu
-     * ray_tracing_surface_rank_0000.vtu
-     * ray_tracing_surface_rank_0001.vtu
-     * @endcode
-     *
      *
      * @param basename Base filename without extension.
      */
@@ -173,9 +166,11 @@ namespace MeltPoolDG::RadiativeTransport
     write_surface(const std::string &basename) const;
 
     /**
-     * Return the number of interface primitives stored on this MPI rank.
+     * @brief Return the number of interface primitives stored on this MPI rank.
      *
      * The primitives are line segments for dim==2 and triangles for dim==3.
+     *
+     * @return Number of local interface primitives.
      */
     unsigned int
     n_local_interface_cells() const;
@@ -185,7 +180,8 @@ namespace MeltPoolDG::RadiativeTransport
     using MemorySpace    = typename ExecutionSpace::memory_space;
 
     /**
-     * ArborX query geometry.
+     * @brief ArborX query geometry.
+     *
      * dim==2: finite segment (ArborX has no 2D ray), see compute_first_hits()
      * dim==3: infinite ray
      */
@@ -193,7 +189,7 @@ namespace MeltPoolDG::RadiativeTransport
                                            ArborX::Experimental::Segment<2, number>,
                                            ArborX::Experimental::Ray<number>>;
     /**
-     * Interface primitive used by the local ArborX tree.
+     * @brief Interface primitive used by the local ArborX tree.
      *
      * dim==2: line segment
      * dim==3: triangle
@@ -205,8 +201,10 @@ namespace MeltPoolDG::RadiativeTransport
     using Predicate = decltype(ArborX::intersects(ArborXQuery{}));
 
     /**
-     * Interface primitive together with the active_cell_index of the locally
-     * owned background cell it was reconstructed from.
+     * @brief Interface primitive together with the background cell it belongs to.
+     *
+     * The cell is given by the active_cell_index of the locally owned
+     * background cell the primitive was reconstructed from.
      */
     struct SurfacePrimitive
     {
@@ -232,7 +230,7 @@ namespace MeltPoolDG::RadiativeTransport
 
 
     /**
-     * Minimal information returned from a rank owning an intersected
+     * @brief Minimal information returned from a rank owning an intersected
      * interface primitive.
      */
     struct HitCandidate
@@ -246,7 +244,7 @@ namespace MeltPoolDG::RadiativeTransport
     };
 
     /**
-     * Closest positive intersection for one ray.
+     * @brief Closest positive intersection for one ray.
      */
     struct FirstHit
     {
@@ -254,15 +252,16 @@ namespace MeltPoolDG::RadiativeTransport
       number                         distance = std::numeric_limits<number>::infinity();
       dealii::Point<dim>             point;
       dealii::Tensor<1, dim, number> normal;
-      unsigned int                   cell_index =
-        dealii::numbers::invalid_unsigned_int; // active_cell_index of the cell containing the hit,
-                                               // rank-local
-      unsigned int rank =
-        dealii::numbers::invalid_unsigned_int; // rank that holds the cell which was hit
+
+      /// active_cell_index of the cell containing the hit, rank-local
+      unsigned int cell_index = dealii::numbers::invalid_unsigned_int;
+
+      /// rank that holds the cell which was hit
+      unsigned int rank = dealii::numbers::invalid_unsigned_int;
     };
 
     /**
-     * Callback evaluated on the MPI rank owning the candidate primitive.
+     * @brief Callback evaluated on the MPI rank owning the candidate primitive.
      *
      * In two dimensions an exact segment-segment intersection is computed.
      * In three dimensions the finite query segment is converted into an
@@ -276,6 +275,13 @@ namespace MeltPoolDG::RadiativeTransport
       number       minimum_distance;
       unsigned int rank;
 
+      /**
+       * @brief Compute the exact intersection of a query with a candidate primitive.
+       *
+       * @param predicate ArborX predicate holding the query geometry.
+       * @param primitive Candidate interface primitive.
+       * @param out Output functor, called with a HitCandidate if a valid intersection is found.
+       */
       template <typename PredicateType, typename PrimitiveType, typename OutputFunctor>
       KOKKOS_FUNCTION void
       operator()(const PredicateType &predicate,
@@ -284,8 +290,15 @@ namespace MeltPoolDG::RadiativeTransport
     };
 
     /**
-     * Determine the closest positive interface intersection for each locally
+     * @brief Determine the closest positive interface intersection for each locally
      * owned ray.
+     *
+     * @param rays Rays owned by the current MPI process.
+     *
+     * @return One FirstHit per ray, in the order of @p rays. Rays without an
+     * intersection have FirstHit::hit set to false.
+     *
+     * @throws dealii::ExcMessage if the direction of a ray is zero.
      */
     std::vector<FirstHit>
     compute_first_hits(const std::vector<Ray> &rays) const;
@@ -297,35 +310,25 @@ namespace MeltPoolDG::RadiativeTransport
 
     ExecutionSpace execution_space;
 
-    /**
-     * Linear mapping used for marching-square/cube reconstruction.
-     */
+    /// Linear mapping used for marching-square/cube reconstruction.
     dealii::MappingQGeneric<dim> mapping;
 
-    /**
-     * Global axis-aligned bounding box of the background mesh.
-     */
+    /// Lower corner of the global axis-aligned bounding box of the background mesh.
     dealii::Point<dim> domain_min;
+
+    /// Upper corner of the global axis-aligned bounding box of the background mesh.
     dealii::Point<dim> domain_max;
 
-    /**
-     * Rank-local marching-square/cube vertices.
-     */
+    /// Rank-local marching-square/cube vertices.
     std::vector<dealii::Point<dim>> local_surface_vertices;
 
-    /**
-     * Rank-local marching-square/cube cells.
-     */
+    /// Rank-local marching-square/cube cells.
     std::vector<dealii::CellData<dim - 1>> local_surface_cells;
 
-    /**
-     * Rank-local ArborX interface primitives.
-     */
+    /// Rank-local ArborX interface primitives.
     Kokkos::View<SurfacePrimitive *, MemorySpace> local_primitives;
 
-    /**
-     * Distributed ArborX tree.
-     */
+    /// Distributed ArborX tree.
     std::unique_ptr<Tree> tree;
   };
 #endif

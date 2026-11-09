@@ -81,9 +81,7 @@ namespace MeltPoolDG::RadiativeTransport
       }
     else
       {
-        /*
-         * In 3D, query is already ArborX::Experimental::Ray<number>.
-         */
+        // In 3D, query is already ArborX::Experimental::Ray<number>.
         number t_min;
         number t_max;
 
@@ -261,12 +259,9 @@ namespace MeltPoolDG::RadiativeTransport
 
         if constexpr (dim == 2)
           {
-            /*
-             * ArborX has no 2D Ray geometry.
-             *
-             * Represent the ray as a finite segment extending beyond the
-             * global bounding box.
-             */
+            // ArborX has no 2D Ray geometry.
+            // Represent the ray as a finite segment extending beyond the
+            // global bounding box.
             const std::array<Point<dim>, 4> corners = {{Point<dim>(domain_min[0], domain_min[1]),
                                                         Point<dim>(domain_max[0], domain_min[1]),
                                                         Point<dim>(domain_min[0], domain_max[1]),
@@ -296,11 +291,8 @@ namespace MeltPoolDG::RadiativeTransport
           }
         else
           {
-            /*
-             * ArborX provides a native infinite 3D ray.
-             *
-             * Its constructor normalizes the direction internally.
-             */
+            // ArborX provides a native infinite 3D ray.
+            // Its constructor normalizes the direction internally.
             const ArborXQuery query{{{rays[i].origin[0], rays[i].origin[1], rays[i].origin[2]}},
                                     {{direction[0], direction[1], direction[2]}}};
 

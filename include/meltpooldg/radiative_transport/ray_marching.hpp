@@ -21,7 +21,7 @@
 namespace MeltPoolDG::RadiativeTransport
 {
   /**
-   * Ray marcher for an interface given by the level set of a finite element field.
+   * @brief Ray marcher for an interface given by the level set of a finite element field.
    *
    * Rays are deal.II particles that advance to the next cell each timestep and are moved
    * by a ParticleHandler. In cells cut by the interface, the level set is sampled along the
@@ -55,7 +55,19 @@ namespace MeltPoolDG::RadiativeTransport
       number contour_value = 0.0;
     };
 
-    /// Collective. Triangulation, DoFHandler and level set must outlive this object.
+    /**
+     * @brief Construct the ray marcher for the given level set.
+     *
+     * Collective. Triangulation, DoFHandler and level set must outlive this object.
+     *
+     * @param level_set_dof_handler DoFHandler associated with the level-set field.
+     * @param level_set Distributed level-set vector.
+     * @param parameters Ray-marching parameters.
+     * @param mpi_communicator MPI communicator used for the particle communication.
+     *
+     * @throws dealii::ExcMessage if the optical parameters are invalid or if a locally
+     * owned cell is not an axis-aligned box.
+     */
     RayMarching(const dealii::DoFHandler<dim> &level_set_dof_handler,
                 const VectorType              &level_set,
                 const Parameters              &parameters       = Parameters{},
@@ -66,17 +78,42 @@ namespace MeltPoolDG::RadiativeTransport
     RayMarching &
     operator=(const RayMarching &) = delete;
 
-    /// Collective. Call after mesh or level-set changes; inputs are stored by reference.
+    /**
+     * @brief Reinitialize the ray marcher after mesh or level-set changes.
+     *
+     * Collective. Inputs are stored by reference.
+     *
+     * @param level_set_dof_handler DoFHandler associated with the current level-set field.
+     * @param level_set Distributed level-set vector.
+     *
+     * @throws dealii::ExcMessage if a locally owned cell is not an axis-aligned box.
+     */
     void
     reinit(const dealii::DoFHandler<dim> &level_set_dof_handler, const VectorType &level_set);
 
-    /// Collective. Every ray must be passed on exactly one rank and start inside the domain
-    /// (rays outside are dropped by the ParticleHandler). Returns the hits found on this rank.
-    /// Energy of dropped rays is added onto lost_energy.
+    /**
+     * @brief Trace rays through the interface.
+     *
+     * Collective. Every ray must be passed on exactly one rank and start inside the domain
+     * (rays outside are dropped by the ParticleHandler). Energy of dropped rays is added onto
+     * lost_energy.
+     *
+     * @param rays Rays to trace.
+     *
+     * @return Intersections found on this rank.
+     *
+     * @throws dealii::ExcMessage if max_steps is reached before all rays ended.
+     */
     std::vector<Intersection>
     trace(const std::vector<Ray> &rays);
 
-    /// Collective. Energy of rays that left the domain during the last trace().
+    /**
+     * @brief Energy of rays that left the domain during the last trace().
+     *
+     * Collective.
+     *
+     * @return Energy summed over all MPI ranks.
+     */
     number
     get_lost_energy() const;
 
@@ -94,11 +131,13 @@ namespace MeltPoolDG::RadiativeTransport
     MPI_Comm   mpi_communicator;
     Parameters parameters;
 
-    // Not owned, set by reinit().
+    /// DoFHandler of the level set. Not owned, set by reinit().
     const dealii::DoFHandler<dim> *level_set_dof_handler = nullptr;
-    const VectorType              *level_set             = nullptr;
 
-    // Used only by the ParticleHandler, so it must be declared before it.
+    /// Level-set vector. Not owned, set by reinit().
+    const VectorType *level_set = nullptr;
+
+    /// Used only by the ParticleHandler, so it must be declared before it.
     dealii::MappingQ<dim> mapping;
 
     dealii::Particles::ParticleHandler<dim>                   particle_handler;
