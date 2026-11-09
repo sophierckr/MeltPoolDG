@@ -59,11 +59,13 @@ namespace MeltPoolDG::RadiativeTransport
    * energy is returned together with the intersection position and incoming
    * ray direction.
    *
+   * Intersections are stored on the rank that owns the intersected geometry.
+   *
    * A ray is removed if
    *
    * - it does not intersect the interface,
-   * - its reflected energy falls below Parameters::energy_threshold, or
-   * - Parameters::max_reflections is reached.
+   * - its reflected energy falls below OpticalParameters::energy_threshold, or
+   * - OpticalParameters::max_reflections is reached.
    *
    * @tparam dim Spatial dimension. Supported values are 2 and 3.
    * @tparam number Floating-point number type.
@@ -79,9 +81,20 @@ namespace MeltPoolDG::RadiativeTransport
     struct Parameters
     {
       OpticalParameters<number> optics;
-      unsigned int              marching_cube_subdivisions = 2;
-      number                    marching_cube_tolerance    = 1e-10;
-      number                    ray_epsilon                = 1e-10;
+      /*
+       * Subdivisions per background cell used by the marching-square/cube algorithm.
+       */
+      unsigned int marching_cube_subdivisions = 2;
+
+      /*Geometrical tolerance of the marching -
+        square / cube algorithm.*/
+      number marching_cube_tolerance = 1e-10;
+
+      /*
+       * Offset of a reflected ray origin along the new direction and minimum hit
+       * distance, so that a ray does not hit the primitive it was reflected from.
+       */
+      number ray_epsilon = 1e-10;
     };
 
     /**
@@ -138,8 +151,7 @@ namespace MeltPoolDG::RadiativeTransport
     trace(const std::vector<Ray> &initial_rays) const;
 
     /**
-     * Write the locally reconstructed interface to one VTU file per MPI rank
-     * and create a PVTU master file.
+     * Write the locally reconstructed interface of all MPI ranks into the single file.
      *
      * In two dimensions the interface files contain line elements. In three
      * dimensions they contain triangular elements.
@@ -154,8 +166,6 @@ namespace MeltPoolDG::RadiativeTransport
      * ray_tracing_surface_rank_0001.vtu
      * @endcode
      *
-     * Ranks with an empty local interface do not generate a VTU piece and are
-     * not listed in the PVTU file.
      *
      * @param basename Base filename without extension.
      */
@@ -175,8 +185,9 @@ namespace MeltPoolDG::RadiativeTransport
     using MemorySpace    = typename ExecutionSpace::memory_space;
 
     /**
-     * A dimension-independent finite segment is used as the ArborX query
-     * geometry.
+     * ArborX query geometry.
+     * dim==2: finite segment (ArborX has no 2D ray), see compute_first_hits()
+     * dim==3: infinite ray
      */
     using ArborXQuery = std::conditional_t<dim == 2,
                                            ArborX::Experimental::Segment<2, number>,
@@ -193,6 +204,10 @@ namespace MeltPoolDG::RadiativeTransport
 
     using Predicate = decltype(ArborX::intersects(ArborXQuery{}));
 
+    /**
+     * Interface primitive together with the active_cell_index of the locally
+     * owned background cell it was reconstructed from.
+     */
     struct SurfacePrimitive
     {
       ArborXPrimitive geometry;
@@ -239,9 +254,11 @@ namespace MeltPoolDG::RadiativeTransport
       number                         distance = std::numeric_limits<number>::infinity();
       dealii::Point<dim>             point;
       dealii::Tensor<1, dim, number> normal;
-      unsigned int cell_index; // active_cell_index of the cell containing the hit, rank-local
-      unsigned int rank;       // rank that holds the cell which was hit
-      // dealii::Point<dim> reference_location; // position of the hit in the reference cell
+      unsigned int                   cell_index =
+        dealii::numbers::invalid_unsigned_int; // active_cell_index of the cell containing the hit,
+                                               // rank-local
+      unsigned int rank =
+        dealii::numbers::invalid_unsigned_int; // rank that holds the cell which was hit
     };
 
     /**
@@ -251,8 +268,8 @@ namespace MeltPoolDG::RadiativeTransport
      * In three dimensions the finite query segment is converted into an
      * ArborX ray and an exact ray-triangle intersection is evaluated.
      *
-     * Only the intersection distance and interface normal are returned to the
-     * MPI rank owning the ray.
+     * Only the intersection distance, interface normal, cell index and the owning rank are returned
+     * to the MPI rank owning the ray.
      */
     struct IntersectionCallback
     {

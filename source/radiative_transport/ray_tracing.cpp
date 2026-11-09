@@ -87,7 +87,7 @@ namespace MeltPoolDG::RadiativeTransport
         number t_min;
         number t_max;
 
-        if (!ArborX::Experimental::intersection(query, primitive, t_min, t_max))
+        if (not ArborX::Experimental::intersection(query, primitive, t_min, t_max))
           return;
 
         number distance = std::numeric_limits<number>::infinity();
@@ -95,10 +95,10 @@ namespace MeltPoolDG::RadiativeTransport
         if (t_min > minimum_distance)
           distance = t_min;
 
-        if (t_max > minimum_distance && t_max < distance)
+        if (t_max > minimum_distance and t_max < distance)
           distance = t_max;
 
-        if (!(distance < std::numeric_limits<number>::infinity()))
+        if (not(distance < std::numeric_limits<number>::infinity()))
           return;
 
         const number e1x = primitive.b[0] - primitive.a[0];
@@ -136,7 +136,7 @@ namespace MeltPoolDG::RadiativeTransport
     , parameters(parameters_in)
     , mapping(1) // TODO: Allow user to specify mapping degree.
   {
-    AssertThrow(dim == 2 || dim == 3, ExcMessage("RayTracing only supports dim=2 and dim=3."));
+    AssertThrow(dim == 2 or dim == 3, ExcMessage("RayTracing only supports dim=2 and dim=3."));
     parameters.optics.check();
     AssertThrow(parameters.ray_epsilon > 0.0, ExcMessage("Ray epsilon must be positive."));
     AssertThrow(Kokkos::is_initialized(),
@@ -161,12 +161,13 @@ namespace MeltPoolDG::RadiativeTransport
 
     const bool vector_is_ghosted = level_set.has_ghost_elements();
 
-    if (!vector_is_ghosted)
+    if (not vector_is_ghosted)
       level_set.update_ghost_values();
 
+    // Same loop as MarchingCubeAlgorithm::process(), but cell by cell so that every primitive
+    // knows the background cell it comes from.
     std::vector<unsigned int> cell_indices;
-    for (const auto
-           &cell : // replaces marching_cubes.process() which would also just call process_cell()
+    for (const auto &cell :
          level_set_dof_handler.active_cell_iterators() | IteratorFilters::LocallyOwnedCell())
       {
         const std::size_t n_before = local_surface_cells.size();
@@ -179,15 +180,14 @@ namespace MeltPoolDG::RadiativeTransport
       }
 
 
-    if (!vector_is_ghosted)
+    if (not vector_is_ghosted)
       level_set.zero_out_ghost_values();
 
     local_primitives = Kokkos::View<SurfacePrimitive *, MemorySpace>("ray_tracing_local_primitives",
                                                                      local_surface_cells.size());
 
     // storing the surface both the indexed mesh from the marching cube algorithm and the
-    // non-indexed mesh for ArborX might need a lot of memory for high-resolution meshes, is there a
-    // more efficient way?
+    // non-indexed mesh for ArborX might need a lot of memory for high-resolution meshes
     for (unsigned int i = 0; i < local_surface_cells.size(); ++i)
       {
         const auto &cell = local_surface_cells[i];
@@ -224,14 +224,14 @@ namespace MeltPoolDG::RadiativeTransport
     local_min.fill(std::numeric_limits<number>::max());
     local_max.fill(std::numeric_limits<number>::lowest());
 
-    for (const auto &cell : level_set_dof_handler.active_cell_iterators())
-      if (cell->is_locally_owned())
-        for (const unsigned int vertex : cell->vertex_indices())
-          for (unsigned int d = 0; d < dim; ++d)
-            {
-              local_min[d] = std::min(local_min[d], static_cast<number>(cell->vertex(vertex)[d]));
-              local_max[d] = std::max(local_max[d], static_cast<number>(cell->vertex(vertex)[d]));
-            }
+    for (const auto &cell :
+         level_set_dof_handler.active_cell_iterators() | IteratorFilters::LocallyOwnedCell())
+      for (const unsigned int vertex : cell->vertex_indices())
+        for (unsigned int d = 0; d < dim; ++d)
+          {
+            local_min[d] = std::min(local_min[d], static_cast<number>(cell->vertex(vertex)[d]));
+            local_max[d] = std::max(local_max[d], static_cast<number>(cell->vertex(vertex)[d]));
+          }
 
     for (unsigned int d = 0; d < dim; ++d)
       {
@@ -377,8 +377,7 @@ namespace MeltPoolDG::RadiativeTransport
           active_rays.emplace_back(ray);
         }
 
-    // intersections sorted by rank so that they can be send to the owner of the geometry thats hit
-    // afterwards
+    // intersections grouped by the rank owning the hit cell, sent there after tracing
     std::map<unsigned int, std::vector<Intersection>> intersections_by_rank;
 
 
@@ -401,7 +400,7 @@ namespace MeltPoolDG::RadiativeTransport
             const Ray      &ray = active_rays[i];
             const FirstHit &hit = hits[i];
 
-            if (!hit.hit)
+            if (not hit.hit)
               continue;
 
             Tensor<1, dim, number> direction = ray.direction;
@@ -409,12 +408,8 @@ namespace MeltPoolDG::RadiativeTransport
 
             const auto r = reflect(direction, hit.normal, ray.energy, parameters.optics);
 
-            intersections_by_rank[hit.rank].emplace_back(Intersection{hit.point,
-                                                                      direction,
-                                                                      r.absorbed_energy,
-                                                                      ray.id,
-                                                                      reflection,
-                                                                      hit.cell_index}); // FIXME
+            intersections_by_rank[hit.rank].emplace_back(Intersection{
+              hit.point, direction, r.absorbed_energy, ray.id, reflection, hit.cell_index});
 
             if (r.reflected_energy < parameters.optics.energy_threshold)
               continue;
@@ -433,13 +428,13 @@ namespace MeltPoolDG::RadiativeTransport
 
     // Right now, all intersections are on the rank of the corresponding ray, we now send them to
     // the rank that owns the geometry that got hit
-    auto        received = Utilities::MPI::some_to_some(mpi_communicator, intersections_by_rank);
-    std::size_t n_total  = 0;
+    auto        received   = Utilities::MPI::some_to_some(mpi_communicator, intersections_by_rank);
+    std::size_t n_received = 0;
     for (const auto &[sender, vec] : received)
-      n_total += vec.size();
+      n_received += vec.size();
     std::vector<Intersection> intersections;
 
-    intersections.reserve(n_total);
+    intersections.reserve(n_received);
     for (const auto &[rank, vec] : received)
       {
         intersections.insert(intersections.end(), vec.begin(), vec.end());
@@ -452,12 +447,8 @@ namespace MeltPoolDG::RadiativeTransport
   void
   RayTracing<dim, number>::write_surface(const std::string &basename) const
   {
-    const unsigned int has_surface  = local_surface_cells.empty() ? 0 : 1;
-    const auto has_surface_per_rank = Utilities::MPI::all_gather(mpi_communicator, has_surface);
-
-    const auto first_rank_with_surface = std::ranges::find(has_surface_per_rank, 1u);
-
-    if (first_rank_with_surface == has_surface_per_rank.end())
+    const unsigned int has_surface = local_surface_cells.empty() ? 0 : 1;
+    if (Utilities::MPI::max(has_surface, mpi_communicator) == 0)
       return;
 
     Triangulation<dim - 1, dim> surface_triangulation;
@@ -484,7 +475,6 @@ namespace MeltPoolDG::RadiativeTransport
   {
     return static_cast<unsigned int>(local_surface_cells.size());
   }
-
 
   template class RayTracing<2, double>;
   template class RayTracing<3, double>;
