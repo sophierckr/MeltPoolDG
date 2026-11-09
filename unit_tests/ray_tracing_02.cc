@@ -21,16 +21,16 @@
 #include "meltpooldg/radiative_transport/ray_rhs_assembly.hpp"
 #include <meltpooldg/post_processing/output_data.hpp>
 #include <meltpooldg/post_processing/postprocessor.hpp>
-#include <meltpooldg/radiative_transport/ray_tracing.hpp> // changed: was ray_marching.hpp
+#include <meltpooldg/radiative_transport/ray_tracing.hpp>
 #include <meltpooldg/radiative_transport/ray_utils.hpp>
 #include <meltpooldg/time_integration/time_stepping_data.hpp>
 
 #include <Kokkos_Core.hpp>
 
-#include <array>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <numbers>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -97,12 +97,12 @@ namespace
             const MPI_Comm                                                    mpi_comm,
             const std::string                                                &basename)
   {
-    // Energie pro Zelle (Debug: Sind es die erwarteten Zellen?)
+    // Energy per cell (debug output: are these the expected cells?)
     Vector<float> cell_energy(dof_handler.get_triangulation().n_active_cells());
     for (const auto &hit : intersections)
       cell_energy[hit.cell_index] += hit.energy;
 
-    rhs.update_ghost_values(); // DataOut braucht Ghost-Werte
+    rhs.update_ghost_values(); // DataOut needs ghost values
 
     DataOut<dim> data_out;
     data_out.add_data_vector(dof_handler, level_set, "level_set");
@@ -159,7 +159,7 @@ namespace
 
     write_background(dof_handler, level_set, mapping, mpi_comm, basename + "_background");
 
-    using RayTracer = RadiativeTransport::RayTracing<dim, double>; // changed
+    using RayTracer = RadiativeTransport::RayTracing<dim, double>;
 
     typename RayTracer::Parameters parameters;
 
@@ -167,20 +167,20 @@ namespace
 
     parameters.optics.refractive_index_material = 1.5;
 
-    // changed: RayTracing has no contour_value parameter and always reconstructs the zero level
-    // set. Make sure the test level set is actually zero at the interface.
+    // RayTracing has no contour_value parameter and always reconstructs the zero level set. Make
+    // sure the test level set is actually zero at the interface.
     AssertThrow(interface_contour_value<double>(LevelSet::LevelSetType::signed_distance) == 0.0,
                 ExcMessage("RayTracing reconstructs the zero contour only."));
 
     parameters.optics.energy_threshold = 1e-4;
 
-    // changed: max_reflections is the maximum number of interface interactions per ray in
-    // RayTracing, so 1 gives the single hit per ray that max_reflections = 0 gives in RayMarching.
+    // max_reflections is the maximum number of interface interactions per ray, so every ray hits
+    // the interface exactly once.
     parameters.optics.max_reflections = 1;
 
-    RayTracer ray_tracer(dof_handler, level_set, parameters, mpi_comm); // changed
+    RayTracer ray_tracer(dof_handler, level_set, parameters, mpi_comm);
 
-    ray_tracer.write_surface(basename + "_surface"); // changed: debug output of the reconstruction
+    ray_tracer.write_surface(basename + "_surface"); // debug output of the reconstruction
 
     const double beam_power  = 87.5;
     const double beam_radius = 70e-6;
@@ -198,12 +198,29 @@ namespace
     const auto local_rays = RadiativeTransport::make_laser_rays<dim, double>(
       center, direction, profile, a, h, rank, Utilities::MPI::n_mpi_processes(mpi_comm));
 
-    double local_ray_energy = 0.0;
+    double       local_ray_energy = 0.0;
+    unsigned int local_n_rays     = 0; // rays below the energy threshold are dropped by the tracers
     for (const auto &ray : local_rays)
-      local_ray_energy += ray.energy;
-    const double energy_in = Utilities::MPI::sum(local_ray_energy, mpi_comm);
+      {
+        local_ray_energy += ray.energy;
+        if (ray.energy >= parameters.optics.energy_threshold)
+          ++local_n_rays;
+      }
+    const double       energy_in = Utilities::MPI::sum(local_ray_energy, mpi_comm);
+    const unsigned int n_rays    = Utilities::MPI::sum(local_n_rays, mpi_comm);
 
-    const auto intersections = ray_tracer.trace(local_rays); // changed
+    const auto intersections = ray_tracer.trace(local_rays);
+
+    check_intersections_in_cells(triangulation, intersections);
+
+    // The interface closes the domain below every ray and each ray interacts only once, so every
+    // ray above the energy threshold must produce exactly one intersection (no ray may be lost).
+    const unsigned int n_intersections =
+      Utilities::MPI::sum(static_cast<unsigned int>(intersections.size()), mpi_comm);
+    AssertThrow(n_intersections == n_rays,
+                ExcMessage("Expected one intersection per ray, got " +
+                           std::to_string(n_intersections) + " intersections for " +
+                           std::to_string(n_rays) + " rays."));
 
     OutputData<double> output_data;
     output_data.point.enable   = true;
@@ -247,13 +264,19 @@ namespace
                 5e-3 * energy_analytic,
                 "Wrong energy of the generated rays");
 
-    // changed: RayTracing does not report lost energy (missed rays, reflected remainder), so
-    // total == energy_in cannot be checked. Absorbed energy must at least be positive and not
-    // exceed the incoming energy.
+    // RayTracing does not report lost energy (reflected remainder) yet, so total == energy_in
+    // cannot be checked. Every ray interacts once and the reflectivity is smallest at normal
+    // incidence, which bounds the absorbed energy.
+    const double max_absorbed_energy =
+      (1.0 - RadiativeTransport::fresnel_reflectivity(parameters.optics.refractive_index_incident,
+                                                      parameters.optics.refractive_index_material,
+                                                      1.0)) *
+      energy_in;
     AssertThrow(total_intersection_energy > 0.0, ExcMessage("No energy was absorbed."));
-    AssertThrow(total_intersection_energy <= energy_in * (1.0 + 1e-10),
-                ExcMessage("More energy absorbed than emitted."));
+    AssertThrow(total_intersection_energy <= max_absorbed_energy * (1.0 + 1e-10),
+                ExcMessage("More energy absorbed than physically possible."));
 
+    // Check total energy of rhs
     AssertThrow(std::abs(rhs.l1_norm() - total_intersection_energy) <
                   1e-12 * total_intersection_energy,
                 ExcMessage("Sum of rhs " + std::to_string(rhs.l1_norm()) +

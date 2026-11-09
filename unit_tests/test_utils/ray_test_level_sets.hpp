@@ -4,11 +4,15 @@
 #include <deal.II/base/function.h>
 #include <deal.II/base/point.h>
 
+#include <deal.II/grid/tria.h>
+
 #include <meltpooldg/level_set/level_set_type.hpp>
+#include <meltpooldg/radiative_transport/ray_utils.hpp>
 #include <meltpooldg/utilities/characteristic_functions.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace MeltPoolDG::TestUtils
 {
@@ -132,4 +136,40 @@ namespace MeltPoolDG::TestUtils
     const LevelSet::LevelSetType type;
     const number                 eps;
   };
+
+
+
+  /**
+   * @brief Check that every intersection lies in the locally owned cell given by its cell_index.
+   *
+   * @param triangulation Triangulation the cell indices refer to.
+   * @param intersections Intersections returned by a ray tracer on this rank.
+   *
+   * @throws dealii::ExcMessage if a cell_index is invalid, the cell is not locally owned or the
+   * intersection point lies outside of the cell.
+   */
+  template <int dim, typename number>
+  void
+  check_intersections_in_cells(
+    const dealii::Triangulation<dim>                                 &triangulation,
+    const std::vector<RadiativeTransport::Intersection<dim, number>> &intersections)
+  {
+    std::vector<typename dealii::Triangulation<dim>::active_cell_iterator> cells(
+      triangulation.n_active_cells());
+    for (const auto &cell : triangulation.active_cell_iterators())
+      cells[cell->active_cell_index()] = cell;
+
+    for (const auto &hit : intersections)
+      {
+        AssertThrow(hit.cell_index < cells.size(), dealii::ExcMessage("Invalid cell_index."));
+
+        const auto &cell = cells[hit.cell_index];
+
+        AssertThrow(cell->is_locally_owned(),
+                    dealii::ExcMessage("Intersection assigned to a cell that is not owned."));
+        // relative tolerance: ray marching may place a hit up to ~1e-6 cell sizes outside its cell
+        AssertThrow(cell->bounding_box().point_inside(hit.point, 1e-5),
+                    dealii::ExcMessage("Intersection point lies outside of its cell."));
+      }
+  }
 } // namespace MeltPoolDG::TestUtils

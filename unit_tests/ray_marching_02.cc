@@ -31,6 +31,7 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <numbers>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -97,12 +98,12 @@ namespace
             const MPI_Comm                                                    mpi_comm,
             const std::string                                                &basename)
   {
-    // Energie pro Zelle (Debug: Sind es die erwarteten Zellen?)
+    // Energy per cell (debug output: are these the expected cells?)
     Vector<float> cell_energy(dof_handler.get_triangulation().n_active_cells());
     for (const auto &hit : intersections)
       cell_energy[hit.cell_index] += hit.energy;
 
-    rhs.update_ghost_values(); // DataOut braucht Ghost-Werte
+    rhs.update_ghost_values(); // DataOut needs ghost values
 
     DataOut<dim> data_out;
     data_out.add_data_vector(dof_handler, level_set, "level_set");
@@ -128,7 +129,8 @@ namespace
 
     dealii::ConditionalOStream pcout(std::cout, rank == 0);
 
-    const std::string basename = "ray_marching_" + Utilities::int_to_string(dim) + "d";
+    const std::string basename =
+      "ray_marching_fixed_meltpool_" + Utilities::int_to_string(dim) + "d";
 
     parallel::distributed::Triangulation<dim> triangulation(mpi_comm);
 
@@ -171,7 +173,8 @@ namespace
 
     parameters.optics.energy_threshold = 1e-4;
 
-    parameters.optics.max_reflections = 0;
+    // maximum number of interface interactions per ray: every ray hits the interface once
+    parameters.optics.max_reflections = 1;
 
     RayMarcher ray_marcher(dof_handler, level_set, parameters, mpi_comm);
 
@@ -191,12 +194,29 @@ namespace
     const auto local_rays = RadiativeTransport::make_laser_rays<dim, double>(
       center, direction, profile, a, h, rank, Utilities::MPI::n_mpi_processes(mpi_comm));
 
-    double local_ray_energy = 0.0;
+    double       local_ray_energy = 0.0;
+    unsigned int local_n_rays     = 0; // rays below the energy threshold are dropped by the tracers
     for (const auto &ray : local_rays)
-      local_ray_energy += ray.energy;
-    const double energy_in = Utilities::MPI::sum(local_ray_energy, mpi_comm);
+      {
+        local_ray_energy += ray.energy;
+        if (ray.energy >= parameters.optics.energy_threshold)
+          ++local_n_rays;
+      }
+    const double       energy_in = Utilities::MPI::sum(local_ray_energy, mpi_comm);
+    const unsigned int n_rays    = Utilities::MPI::sum(local_n_rays, mpi_comm);
 
     const auto intersections = ray_marcher.trace(local_rays);
+
+    check_intersections_in_cells(triangulation, intersections);
+
+    // The interface closes the domain below every ray and each ray interacts only once, so every
+    // ray above the energy threshold must produce exactly one intersection (no ray may be lost).
+    const unsigned int n_intersections =
+      Utilities::MPI::sum(static_cast<unsigned int>(intersections.size()), mpi_comm);
+    AssertThrow(n_intersections == n_rays,
+                ExcMessage("Expected one intersection per ray, got " +
+                           std::to_string(n_intersections) + " intersections for " +
+                           std::to_string(n_rays) + " rays."));
 
     OutputData<double> output_data;
     output_data.point.enable   = true;

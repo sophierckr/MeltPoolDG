@@ -128,12 +128,12 @@ namespace
             const MPI_Comm                                                    mpi_comm,
             const std::string                                                &basename)
   {
-    // Energie pro Zelle (Debug: Sind es die erwarteten Zellen?)
+    // Energy per cell (debug output: are these the expected cells?)
     Vector<float> cell_energy(dof_handler.get_triangulation().n_active_cells());
     for (const auto &hit : intersections)
       cell_energy[hit.cell_index] += hit.energy;
 
-    rhs.update_ghost_values(); // DataOut braucht Ghost-Werte
+    rhs.update_ghost_values(); // DataOut needs ghost values
 
     DataOut<dim> data_out;
     data_out.add_data_vector(dof_handler, level_set, "level_set");
@@ -192,45 +192,46 @@ namespace
 
     parameters.optics.refractive_index_material = 1.5;
 
-    /*
-     * For normal incidence with n1=1 and n2=1.5:
-     *
-     * R = 0.04.
-     *
-     * Remaining ray energy:
-     *
-     * 1.0
-     * 0.04
-     * 0.0016
-     * 0.000064
-     *
-     * The fourth value is below the threshold.
-     */
+    // For normal incidence with n1=1 and n2=1.5 the reflectivity is R = 0.04. The energy of the ray
+    // before each interaction is therefore 1.0, 0.04, 0.0016, 0.000064; the fourth value is below
+    // the threshold.
     parameters.optics.energy_threshold = 1e-4;
 
     parameters.optics.max_reflections = 10;
+
+    // Non-zero contour value: the interface is where the level set equals 0.05, i.e. at z = 0.35
+    // and z = 0.65. The zero contour is covered by the fixed melt pool test.
+    parameters.contour_value = 0.05;
 
     RayMarcher ray_marcher(dof_handler, level_set, parameters, mpi_comm);
 
     std::vector<typename RayMarcher::Ray> local_rays;
     double                                energy_ray_1 = 1.0;
     double                                energy_ray_2 = 0.5e-4;
-    double                                energy_in    = energy_ray_1 + energy_ray_2;
+    double                                energy_ray_3 = 0.5;
+    double                                energy_in    = energy_ray_1 + energy_ray_2 + energy_ray_3;
 
     if (rank == 0)
       {
         local_rays.emplace_back(typename RayMarcher::Ray{
           first_ray_origin<dim>(), downward_direction<dim>(), energy_ray_1, 0});
 
-        /*
-         * This ray is below the energy threshold and must therefore be
-         * removed before marching.
-         */
+        // This ray is below the energy threshold and must therefore be
+        // removed before marching.
         local_rays.emplace_back(typename RayMarcher::Ray{
           second_ray_origin<dim>(), downward_direction<dim>(), energy_ray_2, 1});
+
+        // This ray leaves the domain without hitting the interface; its energy must end up in
+        // the lost energy.
+        Point<dim> origin_above = second_ray_origin<dim>();
+        origin_above[dim - 1]   = 0.9;
+        local_rays.emplace_back(
+          typename RayMarcher::Ray{origin_above, -downward_direction<dim>(), energy_ray_3, 2});
       }
 
     const auto intersections = ray_marcher.trace(local_rays);
+
+    check_intersections_in_cells(triangulation, intersections);
 
     OutputData<double> output_data;
     output_data.point.enable   = true;
@@ -252,7 +253,7 @@ namespace
 
 
     // Expected values indexed by reflection (ray history), not by position in the local vector.
-    constexpr std::array<double, 3> expected_z      = {0.3, 0.7, 0.3};
+    constexpr std::array<double, 3> expected_z      = {0.35, 0.65, 0.35};
     constexpr std::array<double, 3> expected_energy = {0.96, 0.0384, 0.001536};
     constexpr std::array<double, 3> expected_dir_z  = {-1.0, 1.0, -1.0};
 
@@ -264,7 +265,8 @@ namespace
     for (const auto &intersection : intersections)
       {
         AssertThrow(intersection.ray_id == 0,
-                    ExcMessage("Ray below the energy threshold generated an intersection."));
+                    ExcMessage("Only ray 0 may generate intersections (ray 1 is below the "
+                               "energy threshold, ray 2 leaves the domain)."));
         AssertThrow(intersection.reflection < expected_z.size(),
                     ExcMessage("Unexpected reflection index."));
 
@@ -288,8 +290,20 @@ namespace
 
         intersection_energy += intersection.energy;
 
-        AssertThrow(intersection.ray_direction[dim - 1] * expected_dir_z[k] > 0.0,
-                    ExcMessage("Wrong ray direction" + tag));
+        check_close(intersection.ray_direction[dim - 1],
+                    expected_dir_z[k],
+                    1e-10,
+                    "Wrong ray direction" + tag);
+
+        // Normal incidence: the ray stays on the vertical line through its origin.
+        for (unsigned int d = 0; d < dim - 1; ++d)
+          {
+            check_close(intersection.ray_direction[d], 0.0, 1e-10, "Wrong ray direction" + tag);
+            check_close(intersection.point[d],
+                        first_ray_origin<dim>()[d],
+                        position_tolerance,
+                        "Wrong lateral intersection position" + tag);
+          }
       }
 
     // Every reflection must occur exactly once, summed over all ranks.
@@ -314,10 +328,7 @@ namespace
     auto total_intersection_energy =
       Utilities::MPI::sum(static_cast<double>(intersection_energy), mpi_comm);
     total_energy += total_intersection_energy;
-    if (rank == 0)
-      {
-        check_close(total_energy, energy_in, energy_tolerance, "Wrong total energy");
-      }
+    check_close(total_energy, energy_in, energy_tolerance, "Wrong total energy");
     AssertThrow(std::abs(rhs.l1_norm() - total_intersection_energy) < 1e-12,
                 ExcMessage("Sum of rhs " + std::to_string(rhs.l1_norm()) +
                            "does not match the energy" + std::to_string(total_intersection_energy) +

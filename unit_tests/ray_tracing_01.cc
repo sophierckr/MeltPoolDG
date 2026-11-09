@@ -25,40 +25,24 @@
 
 #include <Kokkos_Core.hpp>
 
+#include <array>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
+#include "test_utils/ray_test_level_sets.hpp"
+
 using namespace dealii;
 using namespace MeltPoolDG;
+using namespace MeltPoolDG::TestUtils;
 
 using VectorType = LinearAlgebra::distributed::Vector<double>;
 
 namespace
 {
-  template <int dim>
-  class TwoParallelSurfacesLevelSet : public Function<dim>
-  {
-  public:
-    TwoParallelSurfacesLevelSet()
-      : Function<dim>(1)
-    {}
-
-    double
-    value(const Point<dim> &point, const unsigned int component = 0) const override
-    {
-      AssertIndexRange(component, 1);
-
-      const double coordinate = point[dim - 1];
-
-      if (coordinate <= 0.5)
-        return coordinate - 0.3;
-
-      return 0.7 - coordinate;
-    }
-  };
-
   template <int dim>
   Tensor<1, dim>
   downward_direction()
@@ -179,20 +163,9 @@ namespace
 
     parameters.optics.refractive_index_material = 1.5;
 
-    /*
-     * For normal incidence with n1=1 and n2=1.5:
-     *
-     * R = 0.04.
-     *
-     * Remaining ray energy:
-     *
-     * 1.0
-     * 0.04
-     * 0.0016
-     * 0.000064
-     *
-     * The fourth value is below the threshold.
-     */
+    // For normal incidence with n1=1 and n2=1.5 the reflectivity is R = 0.04. The energy of the ray
+    // before each interaction is therefore 1.0, 0.04, 0.0016, 0.000064; the fourth value is below
+    // the threshold.
     parameters.optics.energy_threshold = 1e-4;
 
     parameters.optics.max_reflections = 10;
@@ -214,17 +187,22 @@ namespace
         local_rays.emplace_back(
           typename RayTracer::Ray{first_ray_origin<dim>(), downward_direction<dim>(), 1.0, 0});
 
-        /*
-         * This ray is below the energy threshold and must therefore be
-         * removed before the first ArborX query.
-         */
+        // This ray is below the energy threshold and must therefore be
+        // removed before the first ArborX query.
         local_rays.emplace_back(
           typename RayTracer::Ray{second_ray_origin<dim>(), downward_direction<dim>(), 0.5e-4, 1});
+
+        // This ray starts above both surfaces and points away from them, so it must not hit
+        // anything.
+        Point<dim> origin_above = second_ray_origin<dim>();
+        origin_above[dim - 1]   = 0.9;
+        local_rays.emplace_back(
+          typename RayTracer::Ray{origin_above, -downward_direction<dim>(), 0.5, 2});
       }
 
     const auto intersections = ray_tracer.trace(local_rays);
 
-    // write_intersections<dim>(intersections, mpi_comm, basename + "_intersections");
+    check_intersections_in_cells(triangulation, intersections);
 
     OutputData<double> output_data;
     output_data.point.enable   = true;
@@ -253,7 +231,8 @@ namespace
     for (const auto &intersection : intersections)
       {
         AssertThrow(intersection.ray_id == 0,
-                    ExcMessage("Ray below the energy threshold generated an intersection."));
+                    ExcMessage("Only ray 0 may generate intersections (ray 1 is below the "
+                               "energy threshold, ray 2 misses the interface)."));
         AssertThrow(intersection.reflection < expected_z.size(),
                     ExcMessage("Unexpected reflection index."));
 
@@ -274,11 +253,20 @@ namespace
                     1.0,
                     1e-12,
                     "Stored ray direction not normalized" + tag);
+        check_close(intersection.ray_direction[dim - 1],
+                    expected_dir_z[k],
+                    1e-10,
+                    "Wrong ray direction" + tag);
 
-
-
-        AssertThrow(intersection.ray_direction[dim - 1] * expected_dir_z[k] > 0.0,
-                    ExcMessage("Wrong ray direction" + tag));
+        // Normal incidence: the ray stays on the vertical line through its origin.
+        for (unsigned int d = 0; d < dim - 1; ++d)
+          {
+            check_close(intersection.ray_direction[d], 0.0, 1e-10, "Wrong ray direction" + tag);
+            check_close(intersection.point[d],
+                        first_ray_origin<dim>()[d],
+                        position_tolerance,
+                        "Wrong lateral intersection position" + tag);
+          }
       }
 
     // Every reflection must occur exactly once, summed over all ranks.
@@ -286,6 +274,11 @@ namespace
     Utilities::MPI::sum(ArrayView<const unsigned int>(local_count),
                         mpi_comm,
                         ArrayView<unsigned int>(global_count));
+
+    for (unsigned int k = 0; k < global_count.size(); ++k)
+      AssertThrow(global_count[k] == 1,
+                  ExcMessage("Reflection " + std::to_string(k) + " occurred " +
+                             std::to_string(global_count[k]) + " times, expected exactly once."));
 
     const unsigned int n_interface_cells =
       Utilities::MPI::sum(ray_tracer.n_local_interface_cells(), mpi_comm);
