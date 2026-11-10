@@ -2,7 +2,7 @@
 
 #include <meltpooldg/radiative_transport/ray_tracing.hpp>
 
-#ifdef DEAL_II_WITH_ARBORX
+#ifdef MELTPOOLDG_WITH_RAY_TRACING
 
 #  include <deal.II/base/bounding_box.h>
 #  include <deal.II/base/exceptions.h>

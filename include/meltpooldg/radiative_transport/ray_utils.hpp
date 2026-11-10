@@ -15,7 +15,7 @@
 #include <vector>
 
 /**
- * Types and functions shared by the ray tracers in MeltPoolDG::RadiativeTransport
+ * @brief Types and functions shared by the ray tracers in MeltPoolDG::RadiativeTransport
  * (RayTracing: marching cubes + ArborX, RayMarching: deal.II ParticleHandler).
  *
  * This header must not depend on ArborX, Kokkos or any mesh data structure, so that
@@ -25,35 +25,32 @@ namespace MeltPoolDG::RadiativeTransport
 {
   using namespace dealii;
   /**
-   * Optical parameters common to all ray tracers.
+   * @brief Optical parameters common to all ray tracers.
+   *
+   * @tparam number Floating-point number type.
    */
   template <typename number>
   struct OpticalParameters
   {
-    /**
-     * Refractive index of the medium in which the ray propagates before
-     * reaching the interface.
-     */
+    /// Refractive index of the medium in which the ray propagates before
+    /// reaching the interface.
     number refractive_index_incident = 1.0;
 
-    /**
-     * Refractive index of the material represented by the level-set
-     * interface. The current implementation assumes a real-valued refractive index.
-     */
+    /// Refractive index of the material represented by the level-set
+    /// interface. The current implementation assumes a real-valued refractive index.
     number refractive_index_material = 1.5;
 
-    /**
-     * Minimum reflected ray energy retained for subsequent reflections.
-     */
+    /// Minimum reflected ray energy retained for subsequent reflections.
     number energy_threshold = 1e-4;
 
-    /**
-     * Maximum number of interface interactions considered for each ray.
-     */
+    /// Maximum number of interface interactions considered for each ray.
     unsigned int max_reflections = 20;
 
     /**
-     * Throw if a parameter is outside its valid range.
+     * @brief Throw if a parameter is outside its valid range.
+     *
+     * @throws dealii::ExcMessage if a refractive index is not positive or the energy threshold
+     * is negative.
      */
     void
     check() const
@@ -68,36 +65,35 @@ namespace MeltPoolDG::RadiativeTransport
   };
 
   /**
-   * Representation of a ray.
+   * @brief Representation of a ray.
+   *
+   * @tparam dim Spatial dimension.
+   * @tparam number Floating-point number type.
    */
   template <int dim, typename number>
   struct Ray
   {
-    /**
-     * Current ray origin.
-     */
+    /// Current ray origin.
     dealii::Point<dim> origin;
 
-    /**
-     * Propagation direction. It does not have to be normalized when supplied
-     * to a tracer's trace() function.
-     */
+    /// Propagation direction. It does not have to be normalized when supplied
+    /// to a tracer's trace() function.
     dealii::Tensor<1, dim, number> direction;
 
-    /**
-     * Current ray energy.
-     */
+    /// Current ray energy.
     number energy = 0.0;
 
-    /**
-     * User-defined identifier preserved throughout all reflections.
-     */
+    /// User-defined identifier preserved throughout all reflections.
     std::size_t id = 0;
   };
 
   /**
-   * Information associated with one ray-interface interaction.
+   * @brief Information associated with one ray-interface interaction.
+   *
    * Interface for Postprocessor::process_points().
+   *
+   * @tparam dim Spatial dimension.
+   * @tparam number Floating-point number type.
    */
   template <int dim, typename number>
   struct Intersection
@@ -105,27 +101,30 @@ namespace MeltPoolDG::RadiativeTransport
     dealii::Point<dim>             point;
     dealii::Tensor<1, dim, number> ray_direction;
 
-    /**
-     * Energy absorbed at this interface interaction. If E_in denotes the
-     * incoming ray energy and R the Fresnel reflectivity, this value is
-     *
-     * @f[
-     *   E_\mathrm{abs} = (1-R) E_\mathrm{in}.
-     * @f]
-     */
+    /// Energy absorbed at this interface interaction. If E_in denotes the
+    /// incoming ray energy and R the Fresnel reflectivity, this value is
+    ///
+    /// @f[
+    ///   E_\mathrm{abs} = (1-R) E_\mathrm{in}.
+    /// @f]
     number energy = 0.0;
 
     std::size_t ray_id = 0;
 
-    unsigned int reflection = 0; // Reflection index. The first intersection has index zero.
+    /// Reflection index. The first intersection has index zero.
+    unsigned int reflection = 0;
 
-    unsigned int cell_index; // active_cell_index of the cell containing the hit, rank-local
+    /// active_cell_index of the cell containing the hit, rank-local
+    unsigned int cell_index;
 
     // dealii::Point<dim> reference_location; // position of the hit in the reference cell
 
     /**
-     * Names and interpretations of the properties written by fill_output(). Components of
-     * ray_direction share one name so that they are written as a vector.
+     * @brief Names and interpretations of the properties written by fill_output().
+     *
+     * Components of ray_direction share one name so that they are written as a vector.
+     *
+     * @return Names and component interpretations of the properties.
      */
     static std::pair<std::vector<std::string>,
                      std::vector<dealii::DataComponentInterpretation::DataComponentInterpretation>>
@@ -143,8 +142,13 @@ namespace MeltPoolDG::RadiativeTransport
     }
 
     /**
-     * Write the location and the properties of this intersection, in the order of
-     * get_property_names_and_component_interpretation(), to @p location and @p properties.
+     * @brief Write the location and the properties of this intersection.
+     *
+     * The properties are written in the order of
+     * get_property_names_and_component_interpretation().
+     *
+     * @param location Receives the position of the intersection.
+     * @param properties Receives the properties; must provide space for 3 + dim entries.
      */
     void
     fill_output(dealii::Point<dim> &location, double *properties) const
@@ -157,6 +161,11 @@ namespace MeltPoolDG::RadiativeTransport
         properties[3 + d] = static_cast<double>(ray_direction[d]);
     }
 
+    /**
+     * @brief Serialize the intersection, e.g. to send it between MPI ranks.
+     *
+     * @param ar Archive to read from or write to.
+     */
     template <class Archive>
     void
     serialize(Archive &ar, const unsigned int /*version*/)
@@ -166,11 +175,15 @@ namespace MeltPoolDG::RadiativeTransport
   };
 
   /**
-   * Fresnel reflectivity for unpolarized light and real-valued refractive indices.
+   * @brief Fresnel reflectivity for unpolarized light and real-valued refractive indices.
    *
-   * @param n1 refractive index of the incident medium
-   * @param n2 refractive index of the material
-   * @param cos_theta_i cosine of the angle of incidence, clamped to [0, 1]
+   * @tparam number Floating-point number type.
+   *
+   * @param n1 Refractive index of the incident medium.
+   * @param n2 Refractive index of the material.
+   * @param cos_theta_i Cosine of the angle of incidence, clamped to [0, 1].
+   *
+   * @return Reflectivity R in [0, 1]. It is 1 in case of total internal reflection.
    */
   template <typename number>
   inline number
@@ -198,35 +211,35 @@ namespace MeltPoolDG::RadiativeTransport
   }
 
   /**
-   * Result of one specular reflection at the interface.
+   * @brief Result of one specular reflection at the interface.
+   *
+   * @tparam dim Spatial dimension.
+   * @tparam number Floating-point number type.
    */
   template <int dim, typename number>
   struct Reflection
   {
-    /**
-     * Normalized reflected direction.
-     */
+    /// Normalized reflected direction.
     dealii::Tensor<1, dim, number> direction;
 
-    /**
-     * Energy carried on by the reflected ray, R * E_in.
-     */
+    /// Energy carried on by the reflected ray, R * E_in.
     number reflected_energy;
 
-    /**
-     * Energy absorbed at the interface, (1 - R) * E_in.
-     */
+    /// Energy absorbed at the interface, (1 - R) * E_in.
     number absorbed_energy;
   };
 
   /**
-   * Specular reflection with Fresnel energy split.
+   * @brief Specular reflection with Fresnel energy split.
    *
    * The orientation of @p normal is irrelevant: it is flipped to face the incoming ray.
    *
-   * @param direction normalized incoming ray direction
-   * @param normal interface normal (any length > 0, any orientation)
-   * @param energy incoming ray energy
+   * @param direction Normalized incoming ray direction.
+   * @param normal Interface normal (any length > 0, any orientation).
+   * @param energy Incoming ray energy.
+   * @param parameters Optical parameters providing the refractive indices.
+   *
+   * @return Reflected direction and the reflected and absorbed energy.
    */
   template <int dim, typename number>
   inline Reflection<dim, number>
@@ -253,6 +266,29 @@ namespace MeltPoolDG::RadiativeTransport
     return result;
   }
 
+  /**
+   * @brief Create the rays of a laser beam on a regular grid over the beam cross section.
+   *
+   * The rays start on a grid with side length 2 * @p radius, centered at @p center and
+   * perpendicular to @p beam_direction, and propagate along @p beam_direction. The energy of a
+   * ray is the intensity at its origin times the area (3D) or length (2D) the ray represents.
+   * The rays are distributed round-robin over the MPI ranks: ray i is created on rank
+   * i % @p n_ranks and has the id i.
+   *
+   * @param center Center of the beam cross section.
+   * @param beam_direction Propagation direction of the beam. It does not have to be normalized.
+   * @param intensity_profile Intensity of the beam, evaluated at the ray origins.
+   * @param radius Half side length of the sampled cross section.
+   * @param spacing Maximum distance between neighboring rays. The actual distance is
+   * 2 * @p radius / ceil(2 * @p radius / @p spacing).
+   * @param rank MPI rank on which the rays are created.
+   * @param n_ranks Number of MPI ranks.
+   *
+   * @return The rays assigned to @p rank.
+   *
+   * @throws dealii::ExcMessage if @p radius or @p spacing is not positive, if @p rank is not
+   * smaller than @p n_ranks or if @p beam_direction is zero.
+   */
   template <int dim, typename number>
   std::vector<Ray<dim, number>>
   make_laser_rays(const Point<dim>             &center,

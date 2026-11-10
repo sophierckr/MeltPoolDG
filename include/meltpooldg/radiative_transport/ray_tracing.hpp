@@ -21,6 +21,13 @@
 
 #ifdef DEAL_II_WITH_ARBORX
 #  include <ArborX.hpp>
+
+#  if defined(ARBORX_VERSION) && ARBORX_VERSION >= 20100
+#    define MELTPOOLDG_WITH_RAY_TRACING
+#  endif
+#endif
+
+#ifdef MELTPOOLDG_WITH_RAY_TRACING
 #  include <ArborX_Ray.hpp>
 #  include <ArborX_Segment.hpp>
 #  include <ArborX_Triangle.hpp>
@@ -35,7 +42,8 @@
 
 namespace MeltPoolDG::RadiativeTransport
 {
-#ifdef DEAL_II_WITH_ARBORX
+#ifdef MELTPOOLDG_WITH_RAY_TRACING
+
   /**
    * @brief Distributed ray tracer for interfaces represented by a level-set field.
    *
@@ -331,5 +339,6 @@ namespace MeltPoolDG::RadiativeTransport
     /// Distributed ArborX tree.
     std::unique_ptr<Tree> tree;
   };
+
 #endif
 } // namespace MeltPoolDG::RadiativeTransport
