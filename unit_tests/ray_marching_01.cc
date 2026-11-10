@@ -252,10 +252,10 @@ namespace
     AssertThrow(n_intersections == 3, ExcMessage("Expected exactly three intersections."));
 
 
-    // Expected values indexed by reflection (ray history), not by position in the local vector.
-    constexpr std::array<double, 3> expected_z      = {0.35, 0.65, 0.35};
-    constexpr std::array<double, 3> expected_energy = {0.96, 0.0384, 0.001536};
-    constexpr std::array<double, 3> expected_dir_z  = {-1.0, 1.0, -1.0};
+    // Expected values indexed by reflection (ray history)
+    constexpr std::array<double, 3> expected_z      = {{0.35, 0.65, 0.35}};
+    constexpr std::array<double, 3> expected_energy = {{0.96, 0.0384, 0.001536}};
+    constexpr std::array<double, 3> expected_dir_z  = {{-1.0, 1.0, -1.0}};
 
     constexpr double position_tolerance = 1e-8;
     constexpr double energy_tolerance   = 1e-10;
