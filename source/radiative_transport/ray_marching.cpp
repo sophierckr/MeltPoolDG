@@ -25,49 +25,65 @@ namespace MeltPoolDG::RadiativeTransport
 
   namespace
   {
-    // Bisection for a sign change of f in [a, b], with f_a = f(a).
-    template <typename Function, typename number>
-    number
-    bisect(const Function &f, number a, number b, number f_a, const number tolerance)
-    {
-      while (b - a > tolerance)
-        {
-          const number m   = number(0.5) * (a + b);
-          const number f_m = f(m);
-          if (f_a * f_m <= 0)
-            b = m;
-          else
-            {
-              a   = m;
-              f_a = f_m;
-            }
-        }
-      return number(0.5) * (a + b);
-    }
-
-
-    // First root of f in [t_begin, t_end]:
-    // uniform sampling for a sign change, then bisection.
+    // Illinois method for finding the root
     template <typename Function, typename number>
     std::optional<number>
-    find_first_intersection(const Function    &f,
-                            const number       t_begin,
-                            const number       t_end,
-                            const unsigned int n_samples,
-                            const number       tolerance)
+    find_first_intersection(const Function &f,
+                            const number    t_begin,
+                            const number    t_end,
+                            const number    tolerance_space,
+                            const number    tolerance_value)
     {
-      number t0 = t_begin;
-      number f0 = f(t0);
-      for (unsigned int s = 1; s <= n_samples; ++s)
+      number t0              = t_begin;
+      number f0              = f(t0);
+      number t1              = t_end;
+      number f1              = f(t1);
+      number fz              = INFINITY;
+      number tz              = 0;
+      number m               = 0.5;
+      size_t it              = 0;
+      size_t iteration_limit = 1000;
+
+      if (f0 * f1 > 0)
+        return std::nullopt;
+
+
+      while (abs(t1 - t0) >= tolerance_space and abs(fz) >= tolerance_value and
+             it < iteration_limit)
         {
-          const number t1 = t_begin + (t_end - t_begin) * s / n_samples;
-          const number f1 = f(t1);
-          if (f0 * f1 <= 0)
-            return bisect(f, t0, t1, f0, tolerance);
-          t0 = t1;
-          f0 = f1;
+          it++;
+          number s = (f1 - f0) / (t1 - t0);
+          tz       = t0 - f0 / s;
+          fz       = f(tz);
+          if (fz * f1 < 0)
+            {
+              t0 = t1;
+              f0 = f1;
+              t1 = tz;
+              f1 = fz;
+            }
+          else if (fz * f1 > 0)
+            {
+              f0 = m * f0;
+              t1 = tz;
+              f1 = fz;
+            }
+          else
+            {
+              t0 = tz;
+              f0 = fz;
+              t1 = tz;
+              f1 = fz;
+            }
         }
-      return std::nullopt;
+      if (fz < INFINITY)
+        {
+          return tz;
+        }
+      else
+        {
+          return std::nullopt;
+        }
     }
 
 
@@ -240,18 +256,9 @@ namespace MeltPoolDG::RadiativeTransport
     Vector<number>            cell_values(fe.n_dofs_per_cell());
     std::vector<Intersection> intersections;
 
-    TimeIntegration::TimeSteppingData<number> time_data;
-    time_data.start_time     = 0;
-    time_data.time_step_size = step_length;
-    time_data.end_time       = parameters.max_steps * step_length;
-    time_data.max_n_steps    = parameters.max_steps;
-    TimeIntegration::TimeIterator<number> time_iterator(time_data);
-
-
-
-    while (!time_iterator.is_finished() && particle_handler.n_global_particles() > 0)
+    for (size_t step = 0; step < parameters.max_steps and particle_handler.n_global_particles() > 0;
+         ++step)
       {
-        time_iterator.compute_next_time_increment();
         std::vector<typename Particles::ParticleHandler<dim>::particle_iterator> to_remove;
 
         for (auto particle = particle_handler.begin(); particle != particle_handler.end();
@@ -285,10 +292,13 @@ namespace MeltPoolDG::RadiativeTransport
                   props[Property::has_moved] ? t_entry - parameters.absolute_epsilon : number(0);
                 const number                t_end = t_exit;
                 const std::optional<number> t_hit =
-                  (t_begin < t_end) ?
-                    find_first_intersection(
-                      g, t_begin, t_end, parameters.n_root_samples, root_tolerance) :
-                    std::nullopt;
+                  (t_begin < t_end) ? find_first_intersection( // TODO which values for tolerance?
+                                        g,
+                                        t_begin,
+                                        t_end,
+                                        0.001 * parameters.absolute_epsilon,
+                                        root_tolerance) :
+                                      std::nullopt;
 
                 if (t_hit)
                   {
@@ -323,10 +333,29 @@ namespace MeltPoolDG::RadiativeTransport
                         props[Property::energy]           = r.reflected_energy;
                         props[Property::reflection_count] = reflection + 1;
                         props[Property::has_moved]        = 0;
+                        normal                            = normal / (normal.norm() + 1e-12);
+                        if (normal * r.direction < 0)
+                          normal *= -1;
                         particle->set_location(x_hit + parameters.absolute_epsilon * normal);
                       }
                     continue;
                   }
+              }
+            else
+              {
+#ifdef DEBUG
+                const auto [min_it, max_it] =
+                  std::minmax_element(cell_values.begin(), cell_values.end());
+                const bool cell_may_be_cut =
+                  not(*min_it > parameters.contour_value or *max_it < parameters.contour_value);
+                if (cell_may_be_cut)
+                  {
+                    const auto t_test = find_first_intersection(
+                      g, number(0), t_exit, 0.1 * parameters.absolute_epsilon, root_tolerance);
+                    Assert(!t_test,
+                           ExcMessage("The ray crosses the interface twice inside one cell."));
+                  }
+#endif
               }
 
             particle->set_location(x + (t_exit + parameters.absolute_epsilon) * direction);
