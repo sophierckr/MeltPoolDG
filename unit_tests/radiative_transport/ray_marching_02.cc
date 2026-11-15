@@ -21,6 +21,7 @@
 #include <meltpooldg/post_processing/output_data.hpp>
 #include <meltpooldg/post_processing/postprocessor.hpp>
 #include <meltpooldg/radiative_transport/ray_marching.hpp>
+#include <meltpooldg/radiative_transport/ray_rhs_assembly.hpp>
 #include <meltpooldg/radiative_transport/ray_utils.hpp>
 #include <meltpooldg/time_integration/time_stepping_data.hpp>
 
@@ -82,6 +83,30 @@ namespace
 
     data_out.build_patches(mapping);
 
+    data_out.write_vtu_in_parallel(basename + ".vtu", mpi_comm);
+  }
+  template <int dim>
+  void
+  write_rhs(const DoFHandler<dim>                                            &dof_handler,
+            const VectorType                                                 &level_set,
+            VectorType                                                       &rhs,
+            const std::vector<RadiativeTransport::Intersection<dim, double>> &intersections,
+            const Mapping<dim>                                               &mapping,
+            const MPI_Comm                                                    mpi_comm,
+            const std::string                                                &basename)
+  {
+    // Energy per cell (debug output: are these the expected cells?)
+    Vector<float> cell_energy(dof_handler.get_triangulation().n_active_cells());
+    for (const auto &hit : intersections)
+      cell_energy[hit.cell_index] += hit.absorbed_ray.energy;
+
+    rhs.update_ghost_values(); // DataOut needs ghost values
+
+    DataOut<dim> data_out;
+    data_out.add_data_vector(dof_handler, level_set, "level_set");
+    data_out.add_data_vector(dof_handler, rhs, "heat_rhs");
+    data_out.add_data_vector(cell_energy, "cell_energy", DataOut<dim>::type_cell_data);
+    data_out.build_patches(mapping);
     data_out.write_vtu_in_parallel(basename + ".vtu", mpi_comm);
   }
 
@@ -204,6 +229,18 @@ namespace
     for (const auto &intersection : intersections)
       intersection_energy += intersection.absorbed_ray.energy;
 
+
+    AffineConstraints<double> constraints;
+    constraints.reinit(dof_handler.locally_owned_dofs(),
+                       DoFTools::extract_locally_relevant_dofs(dof_handler));
+    constraints.close();
+    VectorType rhs;
+    rhs.reinit(dof_handler.locally_owned_dofs(),
+               DoFTools::extract_locally_relevant_dofs(dof_handler),
+               mpi_comm);
+
+    RadiativeTransport::assemble_ray_energy_rhs(intersections, dof_handler, constraints, rhs, true);
+
     auto total_intersection_energy =
       Utilities::MPI::sum(static_cast<double>(intersection_energy), mpi_comm);
     total_energy += total_intersection_energy;
@@ -219,6 +256,13 @@ namespace
                 5e-3 * energy_analytic,
                 "Wrong energy of the generated rays");
     check_close(total_energy, energy_in, 1e-10 * energy_in, "Wrong total energy");
+
+    AssertThrow(std::abs(rhs.l1_norm() - total_intersection_energy) <
+                  1e-12 * total_intersection_energy,
+                ExcMessage("Sum of rhs " + std::to_string(rhs.l1_norm()) +
+                           "does not match the energy" + std::to_string(total_intersection_energy) +
+                           "of the hits."));
+    write_rhs(dof_handler, level_set, rhs, intersections, mapping, mpi_comm, basename + "_rhs");
   }
 } // namespace
 
